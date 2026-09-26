@@ -47,9 +47,12 @@ Bluetooth or USB keyboard.
 | `rconnect` | CLI | `pair`, `list`, `revoke`, `status`, settings; talks to `rconnectd` over the control socket |
 | `sd_rconnect` | speech-dispatcher output module | Intercepts speech and forwards it to `rconnectd` or to the real module |
 
-All three can be one binary with subcommands. `sd_rconnect` is then a small wrapper
-installed in `~/.local/libexec/speech-dispatcher-modules/`. The control socket lives in
-`$XDG_RUNTIME_DIR/rconnect/`.
+All three are one binary, `rconnect`: `rconnectd` is `rconnect daemon`, and the binary
+acts as `sd_rconnect` when started through a symlink of that name in
+`~/.local/libexec/speech-dispatcher-modules/`. The control and speech sockets live in
+`$XDG_RUNTIME_DIR/rconnect/`. The identity key and paired devices are kept in
+`~/.local/share/rconnect/` (files readable only by the user), and settings in
+`~/.config/rconnect/config.toml`. Installation steps are in the README.
 
 ### 2.2 Keyboard injection: uinput
 
@@ -193,9 +196,13 @@ independent of SSML and of the phone's TTS engine.
 
 ### 2.4 Power management
 
-During a session `rconnectd` holds a logind inhibitor lock (`sleep:idle:handle-lid-switch`,
-mode `block`) over D-Bus, so the laptop does not suspend while being used remotely. The
-lock is released when the session ends.
+During a session `rconnectd` holds logind inhibitor locks for `sleep` and `idle` (mode
+`block`) over D-Bus, so the laptop does not suspend while being used remotely. The locks
+are released when the session ends. They are requested separately, because polkit may
+grant one and not the other; a denied lock is logged and the session continues.
+`handle-lid-switch` is not requested, because polkit normally reserves it for privileged
+callers. It isn't needed on GNOME, which handles the lid itself and suspends through
+logind, so the `sleep` lock blocks it too.
 
 ### 2.5 Known limitations
 
@@ -283,8 +290,10 @@ device list `{endpoint_id, name, last known addresses}`.
      The one-time secret stops strangers who only know the EndpointId from sending
      pairing requests.
    - **LAN discovery:** the phone lists laptops found through mDNS
-     (`iroh-mdns-address-lookup`, `MdnsAddressLookup::subscribe()`). There is no
-     secret in this case, so the verification code below is the only protection.
+     (`iroh-mdns-address-lookup` with the service name `rconnect`,
+     `MdnsAddressLookup::subscribe()`), and asks each one for its name with
+     `PairRequest::Query`. There is no secret in this case, so the verification words
+     below are the only protection.
 3. The phone sends `PairRequest{secret?, phone_name}`.
 4. **Verification words:** both devices show the same word sequence derived from
    `hash(desktop_id ‖ phone_id)`. Each word encodes 11 bits as an index into a fixed
@@ -419,12 +428,16 @@ This is for audio CAPTCHAs, videos and similar.
 - Phone → desktop (duplex, later): microphone → Opus → a PipeWire virtual source.
 - Late datagrams are dropped, never retransmitted.
 
-## 6. Code layout (proposed)
+## 6. Code layout
 
 ```
 protocol/                 rconnect-protocol crate (messages, framing, pairing URI, verification words)
 desktop/rconnect/         rconnectd + CLI + sd_rconnect (one binary, subcommands)
-mobile/core/              Rust core for Android (UniFFI), espeak-ng build, audio
+  src/daemon/             endpoint, pairing, sessions, uinput, speech hub, sleep inhibitor
+  src/speech/             sd_rconnect module, its IPC with the daemon, speech-monitor
+  dist/                   udev rule, systemd user unit, module config
+mobile/core/              Rust core for Android: pairing and sessions (UniFFI, eSpeak NG
+                          and audio to come); rconnect-dev-controller test binary
 mobile/RConnect/          Android app (Kotlin)
 docs/                     this document
 ```
@@ -449,6 +462,12 @@ Low-priority experiments for later:
       locked or the screen is off.
 - [ ] Which key combinations Android still intercepts before accessibility key filtering,
       on the Android versions we target.
-- [ ] Whether `iroh-mdns-address-lookup` can advertise a display name, or whether the
-      phone must connect on the pairing ALPN to learn it.
-- [ ] How Iroh 1.x exposes idle timeout and keep-alive settings.
+- [x] Whether `iroh-mdns-address-lookup` can advertise a display name: it can, as the
+      endpoint's "user data", but that data is also published through iroh's DNS
+      (pkarr) address lookup. To avoid publishing the computer's name on the internet,
+      it isn't set. The phone asks a discovered host for its name with
+      `PairRequest::Query`.
+- [x] How Iroh 1.x exposes idle timeout and keep-alive settings: through
+      `QuicTransportConfig` (`max_idle_timeout`, `keep_alive_interval`). Both sides use a
+      3 s timeout and a 1 s keep-alive. In testing, a key held when the phone vanished
+      was released 3.1 s later.

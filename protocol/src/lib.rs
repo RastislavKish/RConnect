@@ -25,3 +25,13 @@ pub const ALPN_SESSION: &[u8] = b"rconnect/session/1";
 
 /// Raw public key of a device (the bytes of its iroh `EndpointId`).
 pub type DeviceId = [u8; 32];
+
+/// mDNS service name under which hosts advertise themselves on the local network.
+pub const MDNS_SERVICE_NAME: &str = "rconnect";
+
+/// QUIC idle timeout. Together with [`KEEP_ALIVE_INTERVAL`] it bounds how long a dead
+/// link goes unnoticed, and so how long a key can stay stuck down on the host.
+pub const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Interval of QUIC keep-alive packets.
+pub const KEEP_ALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);

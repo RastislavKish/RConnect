@@ -1,0 +1,16 @@
+[package]
+name = "rconnect-core"
+version = "0.1.0"
+edition = "2024"
+description = "Controller side of RConnect: the Rust core of the Android app"
+
+[dependencies]
+anyhow = "1.0.104"
+iroh = "1.2.0"
+iroh-mdns-address-lookup = "0.5.0"
+rconnect-protocol = { version = "0.1.0", path = "../../protocol" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.21"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "io-util", "io-std", "sync", "time"] }
+tracing = "0.1.44"

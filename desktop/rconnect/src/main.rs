@@ -1,5 +1,8 @@
+mod control;
+mod daemon;
 mod paths;
 mod speech;
+mod store;
 
 use std::path::PathBuf;
 
@@ -21,6 +24,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run the RConnect host service, accepting connections from paired phones.
+    Daemon,
+    /// Pair a phone with this computer.
+    Pair,
+    /// List the paired phones.
+    List,
+    /// Unpair a phone, given its name or the start of its id.
+    Revoke { device: String },
+    /// Show the state of the host service.
+    Status,
     /// Run as a speech-dispatcher output module (normally started by speech-dispatcher
     /// through the `sd_rconnect` symlink).
     SpeechModule {
@@ -53,6 +66,19 @@ fn main() -> anyhow::Result<()> {
     }
 
     match Cli::parse().command {
+        Command::Daemon => {
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| "rconnect=info".into()),
+                )
+                .init();
+            daemon::run()
+        }
+        Command::Pair => control::pair(),
+        Command::List => control::list(),
+        Command::Revoke { device } => control::revoke(device),
+        Command::Status => control::status(),
         Command::SpeechModule { config } => speech::module::run(config),
         Command::SpeechMonitor {
             mirror,

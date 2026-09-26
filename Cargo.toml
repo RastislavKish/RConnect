@@ -1,3 +1,3 @@
 [workspace]
 resolver = "3"
-members = ["protocol", "desktop/rconnect"]
+members = ["protocol", "desktop/rconnect", "mobile/core"]

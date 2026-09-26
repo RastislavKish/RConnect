@@ -1,0 +1,9 @@
+[Unit]
+Description=RConnect host: control this computer from a phone
+
+[Service]
+ExecStart=%h/.cargo/bin/rconnect daemon
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

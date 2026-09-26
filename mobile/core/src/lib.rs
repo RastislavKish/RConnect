@@ -1,0 +1,320 @@
+//! Controller side of RConnect: pairing with hosts and running sessions.
+//!
+//! This is the Rust core of the Android app. The app provides storage for the secret key
+//! and the list of hosts, captures keys, and plays speech; this crate does the networking.
+//! Bindings for Kotlin will be added on top of this API.
+
+use std::net::SocketAddr;
+use std::str::FromStr;
+use std::time::Duration;
+
+use anyhow::Context;
+use iroh::endpoint::{Connection, QuicTransportConfig, RecvStream, SendStream, presets};
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey, TransportAddr};
+use iroh_mdns_address_lookup::MdnsAddressLookup;
+use rconnect_protocol::messages::{
+    Capabilities, ControlMessage, EndReason, Handshake, KeyMessage, PairRejectReason, PairRequest,
+    PairResponse, RejectReason, SpeechCommand, SpeechEvent,
+};
+use rconnect_protocol::ticket::PairingTicket;
+use rconnect_protocol::{
+    ALPN_PAIR, ALPN_SESSION, DeviceId, IDLE_TIMEOUT, KEEP_ALIVE_INTERVAL, MDNS_SERVICE_NAME,
+    PROTOCOL_VERSION, framing, words,
+};
+use serde::{Deserialize, Serialize};
+use tokio::io::BufReader;
+use tokio::sync::mpsc;
+
+/// Priority of the keys stream, above everything else.
+const KEYS_PRIORITY: i32 = 20;
+
+/// A host as remembered by the controller.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Host {
+    pub id: DeviceId,
+    pub name: String,
+    /// Address hints from the pairing ticket; the host is also found through DNS and mDNS.
+    pub relay_url: Option<String>,
+    pub direct_addrs: Vec<SocketAddr>,
+}
+
+impl Host {
+    fn endpoint_addr(&self) -> anyhow::Result<EndpointAddr> {
+        let id = EndpointId::from_bytes(&self.id)?;
+        let mut addrs: Vec<TransportAddr> = self
+            .direct_addrs
+            .iter()
+            .copied()
+            .map(TransportAddr::Ip)
+            .collect();
+        if let Some(relay) = &self.relay_url
+            && let Ok(relay) = RelayUrl::from_str(relay)
+        {
+            addrs.push(TransportAddr::Relay(relay));
+        }
+        Ok(EndpointAddr::from_parts(id, addrs))
+    }
+
+    /// Fingerprint words of the host, for the device details screen.
+    pub fn fingerprint(&self) -> [&'static str; words::FINGERPRINT_WORD_COUNT] {
+        words::fingerprint_words(&self.id)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PairError {
+    #[error("the computer declined the pairing")]
+    Declined,
+    #[error("the pairing code is no longer valid; run `rconnect pair` again")]
+    InvalidSecret,
+    #[error("pairing is not open on the computer; run `rconnect pair` there first")]
+    NotPairing,
+    #[error("the computer runs an incompatible version of RConnect")]
+    UnsupportedVersion,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ConnectError {
+    #[error("this phone is not paired with the computer")]
+    NotPaired,
+    #[error("another phone is controlling the computer")]
+    Busy,
+    #[error("the computer runs an incompatible version of RConnect")]
+    UnsupportedVersion,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+pub struct Controller {
+    endpoint: Endpoint,
+    device_name: String,
+}
+
+impl Controller {
+    /// Starts the controller's endpoint with its persistent secret key.
+    pub async fn new(secret_key: [u8; 32], device_name: String) -> anyhow::Result<Controller> {
+        let transport = QuicTransportConfig::builder()
+            .max_idle_timeout(Some(IDLE_TIMEOUT.try_into()?))
+            .keep_alive_interval(KEEP_ALIVE_INTERVAL)
+            .build();
+        let endpoint = Endpoint::builder(presets::N0)
+            .secret_key(SecretKey::from_bytes(&secret_key))
+            .transport_config(transport)
+            .address_lookup(
+                MdnsAddressLookup::builder()
+                    .service_name(MDNS_SERVICE_NAME)
+                    .advertise(false),
+            )
+            .bind()
+            .await?;
+        Ok(Controller {
+            endpoint,
+            device_name,
+        })
+    }
+
+    pub fn generate_secret_key() -> [u8; 32] {
+        SecretKey::generate().to_bytes()
+    }
+
+    pub fn id(&self) -> DeviceId {
+        *self.endpoint.id().as_bytes()
+    }
+
+    /// Words to show while pairing; the host shows the same ones.
+    pub fn pairing_words(&self, host: &DeviceId) -> [&'static str; words::PAIRING_WORD_COUNT] {
+        words::pairing_words(host, &self.id())
+    }
+
+    /// Pairs with the host from a scanned ticket. Waits until the user decides on the host.
+    pub async fn pair(&self, ticket: &PairingTicket) -> Result<Host, PairError> {
+        let mut host = Host {
+            id: ticket.host_id,
+            name: String::new(),
+            relay_url: ticket.relay_url.clone(),
+            direct_addrs: ticket.direct_addrs.clone(),
+        };
+        let request = PairRequest::Pair {
+            protocol_version: PROTOCOL_VERSION,
+            secret: Some(ticket.secret.0),
+            device_name: self.device_name.clone(),
+        };
+        let connection = self.connect(&host, ALPN_PAIR).await?;
+        let (mut send, recv) = connection.open_bi().await.context("cannot open stream")?;
+        framing::write_message(&mut send, &request)
+            .await
+            .context("cannot send request")?;
+        send.finish().context("cannot send request")?;
+
+        let response = framing::read_message::<_, PairResponse>(&mut BufReader::new(recv))
+            .await
+            .context("no answer from the computer")?;
+        connection.close(0u32.into(), b"done");
+        match response {
+            Some(PairResponse::Accepted { device_name }) => {
+                host.name = device_name;
+                Ok(host)
+            }
+            Some(PairResponse::Rejected(reason)) => Err(match reason {
+                PairRejectReason::Declined => PairError::Declined,
+                PairRejectReason::InvalidSecret => PairError::InvalidSecret,
+                PairRejectReason::NotPairing => PairError::NotPairing,
+                PairRejectReason::UnsupportedVersion(_) => PairError::UnsupportedVersion,
+            }),
+            other => Err(anyhow::anyhow!("unexpected answer {other:?}").into()),
+        }
+    }
+
+    /// Starts a session with a paired host.
+    pub async fn start_session(&self, host: &Host) -> Result<Session, ConnectError> {
+        let connection = self.connect(host, ALPN_SESSION).await?;
+        let (mut control_send, control_recv) =
+            connection.open_bi().await.context("cannot open stream")?;
+        let mut control_recv = BufReader::new(control_recv);
+        let hello = ControlMessage::Hello(Handshake {
+            protocol_version: PROTOCOL_VERSION,
+            app_version: env!("CARGO_PKG_VERSION").into(),
+            device_name: self.device_name.clone(),
+            capabilities: Capabilities::NONE,
+        });
+        framing::write_message(&mut control_send, &hello)
+            .await
+            .context("cannot send hello")?;
+
+        let answer = tokio::time::timeout(
+            Duration::from_secs(10),
+            framing::read_message::<_, ControlMessage>(&mut control_recv),
+        )
+        .await
+        .context("no answer from the computer")?
+        .context("no answer from the computer")?;
+        let welcome = match answer {
+            Some(ControlMessage::Welcome(welcome)) => welcome,
+            Some(ControlMessage::Reject(reason)) => {
+                return Err(match reason {
+                    RejectReason::NotPaired => ConnectError::NotPaired,
+                    RejectReason::Busy => ConnectError::Busy,
+                    RejectReason::UnsupportedVersion(_) => ConnectError::UnsupportedVersion,
+                });
+            }
+            other => return Err(anyhow::anyhow!("unexpected answer {other:?}").into()),
+        };
+
+        let keys = connection
+            .open_uni()
+            .await
+            .context("cannot open keys stream")?;
+        keys.set_priority(KEYS_PRIORITY)
+            .context("cannot open keys stream")?;
+        let (speech_send, speech_recv) =
+            connection.accept_bi().await.context("no speech stream")?;
+
+        let (output_tx, output_rx) = mpsc::unbounded_channel();
+        tokio::spawn(read_speech(BufReader::new(speech_recv), output_tx.clone()));
+        tokio::spawn(read_control(control_recv, output_tx));
+
+        Ok(Session {
+            host_name: welcome.device_name,
+            connection,
+            control: control_send,
+            keys,
+            speech_events: speech_send,
+            outputs: Some(output_rx),
+        })
+    }
+
+    async fn connect(&self, host: &Host, alpn: &[u8]) -> anyhow::Result<Connection> {
+        let addr = host.endpoint_addr()?;
+        tokio::time::timeout(Duration::from_secs(15), self.endpoint.connect(addr, alpn))
+            .await
+            .context("the computer did not answer in time")?
+            .context("cannot connect to the computer")
+    }
+
+    pub async fn shutdown(self) {
+        self.endpoint.close().await;
+    }
+}
+
+/// Why the session ended, from the controller's point of view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionEnd {
+    /// The host ended it.
+    ByHost(EndReason),
+    /// The connection was lost.
+    ConnectionLost,
+}
+
+/// What the host sends during a session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionOutput {
+    Speech(SpeechCommand),
+    /// The session is over; nothing follows.
+    Ended(SessionEnd),
+}
+
+pub struct Session {
+    pub host_name: String,
+    connection: Connection,
+    control: SendStream,
+    keys: SendStream,
+    speech_events: SendStream,
+    outputs: Option<mpsc::UnboundedReceiver<SessionOutput>>,
+}
+
+impl Session {
+    pub async fn send_key(&mut self, message: KeyMessage) -> anyhow::Result<()> {
+        framing::write_message(&mut self.keys, &message).await?;
+        Ok(())
+    }
+
+    pub async fn send_speech_event(&mut self, event: SpeechEvent) -> anyhow::Result<()> {
+        framing::write_message(&mut self.speech_events, &event).await?;
+        Ok(())
+    }
+
+    /// Takes the receiver of everything the host sends, so it can be awaited while keys
+    /// are being sent. Returns `None` after the first call. When the channel closes
+    /// without [`SessionOutput::Ended`], the connection was lost.
+    pub fn take_outputs(&mut self) -> Option<mpsc::UnboundedReceiver<SessionOutput>> {
+        self.outputs.take()
+    }
+
+    /// Ends the session: releases all keys on the host and says goodbye.
+    pub async fn end(mut self) {
+        let _ = self.send_key(KeyMessage::ReleaseAll).await;
+        let goodbye = ControlMessage::EndSession(EndReason::UserRequest);
+        let _ = framing::write_message(&mut self.control, &goodbye).await;
+        let _ = self.control.finish();
+        let _ = tokio::time::timeout(Duration::from_secs(1), self.connection.closed()).await;
+        self.connection.close(0u32.into(), b"bye");
+    }
+}
+
+async fn read_speech(mut stream: BufReader<RecvStream>, tx: mpsc::UnboundedSender<SessionOutput>) {
+    loop {
+        match framing::read_message::<_, SpeechCommand>(&mut stream).await {
+            Ok(Some(command)) => {
+                if tx.send(SessionOutput::Speech(command)).is_err() {
+                    return;
+                }
+            }
+            Err(e) if e.is_recoverable() => tracing::warn!("ignoring speech command: {e}"),
+            Ok(None) | Err(_) => return,
+        }
+    }
+}
+
+async fn read_control(mut stream: BufReader<RecvStream>, tx: mpsc::UnboundedSender<SessionOutput>) {
+    let end = loop {
+        match framing::read_message::<_, ControlMessage>(&mut stream).await {
+            Ok(Some(ControlMessage::EndSession(reason))) => break SessionEnd::ByHost(reason),
+            Ok(Some(_)) => {}
+            Err(e) if e.is_recoverable() => {}
+            Ok(None) | Err(_) => break SessionEnd::ConnectionLost,
+        }
+    };
+    let _ = tx.send(SessionOutput::Ended(end));
+}
