@@ -6,7 +6,7 @@ attached. Keys go from the phone to the computer, and the text the screen reader
 comes back to the phone, where it is synthesized locally. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design.
 
-Status: the desktop side works. The Android app is not written yet;
+Status: the desktop side works. The Android app builds but is not tested on a device yet.
 `rconnect-dev-controller` stands in for it during development.
 
 ## Desktop installation
@@ -77,6 +77,27 @@ local_speech = true
 - `rconnect list`: list paired phones with their fingerprints.
 - `rconnect revoke <name>`: unpair a phone, ending its session if one is active.
 - `rconnect status`: show this computer's fingerprint and what is connected.
+
+## Building the Android app
+
+Requirements: the Android SDK and NDK, Rust with the `aarch64-linux-android` and
+`x86_64-linux-android` targets, `cargo-ndk`, CMake and a C compiler. Check out the eSpeak
+NG submodule first:
+
+```sh
+git submodule update --init
+rustup target add aarch64-linux-android x86_64-linux-android
+cargo install cargo-ndk
+cd mobile/RConnect && ./gradlew assembleDebug
+```
+
+Gradle runs the scripts in `mobile/scripts` to build the Rust core, generate its Kotlin
+bindings and compile eSpeak NG's voice data. The first build takes a while.
+
+After installing, turn on the RConnect key capture service in Android's accessibility
+settings, so that keys the system handles itself (Alt+Tab, the Meta key) reach the
+computer too. To pair, run `rconnect pair` on the computer and scan its QR code with any
+QR code scanner app, which opens RConnect, or paste the pairing link in RConnect.
 
 ## Development
 

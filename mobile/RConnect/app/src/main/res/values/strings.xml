@@ -1,3 +1,32 @@
 <resources>
     <string name="app_name">RConnect</string>
+
+    <string name="computers">Computers</string>
+    <string name="no_computers">No paired computers yet. Run rconnect pair on the computer, then pair it here.</string>
+    <string name="connect_to">Connect to %1$s</string>
+    <string name="remove_named">Remove %1$s</string>
+    <string name="remove_question">Remove %1$s?</string>
+    <string name="remove_explanation">To connect again, you will have to pair the computer again.</string>
+    <string name="remove">Remove</string>
+    <string name="cancel">Cancel</string>
+    <string name="pair_computer">Pair a computer</string>
+    <string name="keep_alive">Keep Bluetooth headphones awake during sessions</string>
+    <string name="service_disabled">The RConnect key capture service is off. Without it, keys the system uses for itself, such as Alt+Tab, do not reach the computer.</string>
+    <string name="open_accessibility_settings">Open accessibility settings</string>
+    <string name="phone_fingerprint">This phone\'s fingerprint: %1$s</string>
+    <string name="core_failed">RConnect could not start: %1$s</string>
+
+    <string name="pair_instructions">Run rconnect pair on the computer. Scan the QR code it shows with any QR code scanner app, or paste the pairing link below.</string>
+    <string name="pairing_link">Pairing link</string>
+    <string name="pair">Pair</string>
+    <string name="pairing_words">Verification words: %1$s. Check that the computer shows the same words, then confirm there.</string>
+    <string name="paired_with">Paired with %1$s.</string>
+    <string name="pairing_failed">Pairing failed.</string>
+
+    <string name="connecting_to">Connecting to %1$s</string>
+    <string name="connected_to">Connected to %1$s. Press CapsLock+F11 to end the session.</string>
+    <string name="connection_failed">Connection failed.</string>
+    <string name="end_session">End session</string>
+
+    <string name="service_description">Sends keys to the computer during an RConnect session, including shortcuts the system would otherwise handle. Outside a session it does nothing.</string>
 </resources>

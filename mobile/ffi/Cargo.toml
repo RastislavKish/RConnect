@@ -1,0 +1,32 @@
+[package]
+name = "rconnect-ffi"
+version = "0.1.0"
+edition = "2024"
+description = "Kotlin bindings of the RConnect controller core"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "rconnect_ffi"
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["cli"]
+
+[features]
+cli = ["uniffi/cli"]
+
+[dependencies]
+anyhow = "1.0.104"
+rconnect-core = { version = "0.1.0", path = "../core" }
+rconnect-protocol = { version = "0.1.0", path = "../../protocol" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.21"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync"] }
+tracing = "0.1.44"
+uniffi = { version = "0.32.2", features = ["tokio"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+ndk-sys = "0.6"
+tracing-subscriber = "0.3.23"

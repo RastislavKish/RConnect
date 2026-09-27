@@ -36,18 +36,20 @@ fn main() {
         .define("USE_LIBSONIC", "OFF")
         .define("USE_LIBPCAUDIO", "OFF")
         .define("ESPEAK_BUILD_MANPAGES", "OFF")
-        // Voice data is compiled with the freshly built espeak-ng, so only natively.
-        .define("COMPILE_INTONATIONS", if native { "ON" } else { "OFF" });
+        .define("COMPILE_INTONATIONS", "ON");
+    if std::env::var("CARGO_CFG_TARGET_OS").unwrap() == "android" {
+        configure_android(&mut config);
+    }
+    if !native {
+        // The default target includes the voice data, which needs an espeak-ng that runs
+        // on the build machine. Cross builds build only the library (and ucd with it).
+        config.build_target("espeak-ng");
+    }
     let out = config.build();
 
-    println!(
-        "cargo:rustc-link-search=native={}",
-        out.join("lib").display()
-    );
-    println!(
-        "cargo:rustc-link-search=native={}",
-        out.join("build/src/ucd-tools").display()
-    );
+    for dir in ["lib", "build/src/libespeak-ng", "build/src/ucd-tools"] {
+        println!("cargo:rustc-link-search=native={}", out.join(dir).display());
+    }
     println!("cargo:rustc-link-lib=static=espeak-ng");
     println!("cargo:rustc-link-lib=static=ucd");
 
@@ -57,5 +59,47 @@ fn main() {
             "cargo:rustc-env=RCONNECT_ESPEAK_DEV_DATA={}",
             data.parent().unwrap().display()
         );
+    }
+}
+
+/// Uses the NDK's own CMake toolchain file, found through the variables cargo-ndk and
+/// Android Studio set.
+fn configure_android(config: &mut cmake::Config) {
+    let ndk = [
+        "ANDROID_NDK_HOME",
+        "ANDROID_NDK_ROOT",
+        "ANDROID_NDK",
+        "NDK_HOME",
+    ]
+    .iter()
+    .find_map(std::env::var_os)
+    .map(PathBuf::from)
+    .expect("set ANDROID_NDK_HOME to the Android NDK");
+    let abi = match std::env::var("CARGO_CFG_TARGET_ARCH").unwrap().as_str() {
+        "aarch64" => "arm64-v8a",
+        "arm" => "armeabi-v7a",
+        "x86_64" => "x86_64",
+        "x86" => "x86",
+        other => panic!("unsupported Android architecture {other}"),
+    };
+    let api = std::env::var("CARGO_NDK_ANDROID_PLATFORM")
+        .or_else(|_| std::env::var("ANDROID_PLATFORM"))
+        .unwrap_or_else(|_| "28".into());
+    let api = api.trim_start_matches("android-");
+    config
+        .define(
+            "CMAKE_TOOLCHAIN_FILE",
+            ndk.join("build/cmake/android.toolchain.cmake"),
+        )
+        .define("ANDROID_ABI", abi)
+        .define("ANDROID_PLATFORM", format!("android-{api}"));
+    for name in [
+        "ANDROID_NDK_HOME",
+        "ANDROID_NDK_ROOT",
+        "ANDROID_NDK",
+        "NDK_HOME",
+        "ANDROID_PLATFORM",
+    ] {
+        println!("cargo:rerun-if-env-changed={name}");
     }
 }

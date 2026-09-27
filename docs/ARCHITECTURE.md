@@ -216,49 +216,78 @@ logind, so the `sleep` lock blocks it too.
 
 ### 3.1 Components
 
-- **Kotlin UI (Compose):** list of paired devices, pairing (QR scan or LAN discovery),
-  settings.
-- **Accessibility service:** filters key events (`flagRequestFilterKeyEvents`,
-  `onKeyEvent`). This runs before most system shortcut handling, so it captures more
-  keys than an Activity can. Home and Power stay out of reach. Outside a session it
-  passes every key through. Future: a global shortcut that opens a session overlay from
-  anywhere, like NVDA Remote.
-- **Foreground service:** owns the session, keeps the connection and audio alive, and
-  holds a screen-on wake lock.
-- **Rust core** (via UniFFI, built with cargo-ndk): Iroh endpoint, protocol, session
-  state, eSpeak NG, and the audio output.
+- **Kotlin UI (Compose)** in `mobile/RConnect`:
+  - `MainActivity`: the list of computers, pairing, settings, and the key capture
+    service's state.
+  - `PairActivity`: takes a pasted link, and opens `rconnect://pair` links, so any FOSS
+    QR scanner can pair until built-in scanning is added.
+  - `SessionActivity`: a running session.
+- **Accessibility service** (`KeyCaptureService`): filters key events
+  (`flagRequestFilterKeyEvents`, `onKeyEvent`). This runs before most system shortcut
+  handling, so it captures more keys than an Activity can; Home and Power stay out of
+  reach. Outside a session it passes every key through. The session screen's own
+  `dispatchKeyEvent` covers the case where the service is off. Both feed `KeyRouter`.
+  Future: a global shortcut that opens a session overlay from anywhere, like NVDA Remote.
+- **Rust core** (`mobile/core`): pairing, sessions, the speech engine (§3.3), and
+  `drive_session`, which connects them. `mobile/ffi` exposes it to Kotlin with UniFFI
+  (`RConnect`, `SessionHandle`, `SessionListener`). Gradle builds it with `cargo-ndk`
+  through `mobile/scripts/`.
+- The session ends when the session screen stops (the user left it or turned the screen
+  off), on CapsLock+F11, or with the End button. The screen stays on during a session.
+  There is no foreground service yet.
 
-F-Droid constraints: no Google Play Services and no ML Kit. Camera: CameraX. QR decoding:
-ZXing or zxing-cpp.
+F-Droid constraints: no Google Play Services and no ML Kit. Kotlin to Rust calls use JNA,
+as UniFFI requires. The identity key never leaves the device: backups and device
+transfers are disabled.
 
 ### 3.2 Keys
 
 - Forward `KeyEvent.getScanCode()`, which on Android is the Linux evdev code. Fall back
-  to a `KEYCODE_* → evdev` table when the scan code is 0.
+  to a `KEYCODE_* → evdev` table when the scan code is 0 (`KeyCodes.kt`).
 - Only forward transitions: drop events with `repeatCount > 0`. Key repeat happens on
-  the desktop.
-- **End-session shortcut**, default `CapsLock+F11` and configurable. The modifier has
-  already been forwarded by the time the second key arrives. The second key is
-  swallowed, `ReleaseAll` is sent, and the session ends.
+  the desktop. A release is sent only for keys whose press was sent.
+- **End-session shortcut**, CapsLock+F11 (configurable later). The modifier has already
+  been forwarded by the time the second key arrives. The second key is swallowed,
+  `ReleaseAll` is sent, and the session ends.
 - The screen must be on and the phone unlocked. **(verify)** whether an accessibility
   service still receives key events from an external keyboard while the device is
   locked or the screen is off. If it does, the "phone in pocket" setup becomes possible.
 
 ### 3.3 Speech and audio output
 
-- eSpeak NG is compiled with the NDK through the Rust core's build script. Voice data
-  is bundled and unpacked on first run. It is GPLv3, like RConnect.
-- **One output stream stays open for the whole session** (cpal on AAudio, low-latency
-  performance mode). eSpeak writes PCM into a ring buffer, and the audio callback plays
-  silence whenever the buffer is empty. Benefits:
+Implemented in `mobile/core/src/speech/`:
+
+- **eSpeak NG 1.52.0** is a git submodule (`mobile/third_party/espeak-ng`). `build.rs`
+  builds it with CMake as a static C library: no speech-player (C++), async mode, audio
+  output, MBROLA or libsonic. It is driven through a dozen hand-written FFI
+  declarations. Cross builds build only the library target, because upstream's default
+  target compiles voice data with the just-built binary, which can't run on the build
+  machine. `mobile/scripts/build-espeak-data.sh` compiles the voice data (19 MB, 8 MB of
+  it Russian) natively. The app ships it as assets and copies it to app storage on first
+  run and after updates. eSpeak NG 1.52 reports `EINVAL` for the punctuation and
+  capitals parameters even though it applies them; that status is ignored.
+- **One thread owns eSpeak NG and the audio stream.** Synthesis runs in 20 ms chunks
+  into a playback buffer. Marks are placed at their sample positions, and `End` at the
+  end of the utterance. The audio callback fires each cue once the samples before it
+  have been handed to the device, so marks and ends follow what the user hears.
+- **Stop and new utterances act immediately** from the caller's thread. They bump a
+  generation counter and clear the buffer, so audio stops within one audio callback and
+  a running synthesis aborts at its next chunk.
+- **One output stream stays open for the whole session:** AAudio in low-latency mode
+  with the accessibility usage on Android (API 28, hence `minSdk` 28), cpal elsewhere. A
+  linear resampler adapts eSpeak NG's 22.05 kHz to the device rate when needed. A stream
+  that breaks, e.g. when headphones connect, is reopened. Benefits:
   - no stream start-up cost per utterance;
   - cancelling is just clearing the buffer;
   - Android does not put the Bluetooth link in standby.
 - **Bluetooth keep-alive:** some headsets turn off on pure digital silence. An option
-  plays inaudible noise (around −60 dBFS) instead of zeros.
-- Speech settings (`rate`, `pitch`, `voice`, `language`, `punctuation`, …) come from the
-  desktop's `SET` values and are mapped to eSpeak NG parameters. The phone may override
-  them locally.
+  plays noise at about -69 dBFS instead of zeros.
+- Speech settings from speech-dispatcher are mapped to eSpeak NG: rate -100..0..100 to
+  80..175..450 words per minute; pitch and range around 50; volume around 100. The voice
+  is chosen by name, else by language.
+- Measured with the dev controller: through the whole chain, an utterance ends when its
+  audio ends (1.68 s for a sentence that takes 1.69 s locally), all marks arrive, and a
+  cancel reaches speech-dispatcher in 2 ms.
 
 ## 4. Identity and pairing
 
@@ -457,7 +486,10 @@ Low-priority experiments for later:
 - [x] Full list of speechd module commands: see §2.3.
 - [x] `705 AUDIO` passes through the proxy as a relayed event. Tested with speechd 0.12.1
       and `sd_espeak-ng`.
-- [ ] Test `sd_rconnect` with Orca itself, not only a Python client mimicking Orca.
+- [x] Test `sd_rconnect` with Orca itself, not only a Python client mimicking Orca: works
+      with Orca and `spd-say`.
+- [ ] Test the Android app on a device: AAudio latency, key capture with and without the
+      accessibility service, and how TalkBack's own key filtering interacts with it.
 - [ ] Whether the accessibility service receives external key events while the phone is
       locked or the screen is off.
 - [ ] Which key combinations Android still intercepts before accessibility key filtering,
