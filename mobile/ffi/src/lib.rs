@@ -244,7 +244,7 @@ pub struct VoiceSettings {
     pub rate_boost: bool,
     /// 0..=100, 50 is normal.
     pub pitch: u8,
-    /// 0..=200, 100 is normal.
+    /// 0..=100, 100 is normal.
     pub volume: u8,
 }
 

@@ -50,7 +50,7 @@ pub struct VoiceSettings {
     pub rate_boost: bool,
     /// 0..=100, 50 is eSpeak NG's normal pitch.
     pub pitch: u8,
-    /// 0..=200, 100 is eSpeak NG's normal volume.
+    /// 0..=100, 100 is eSpeak NG's normal volume, as in NVDA and Orca.
     pub volume: u8,
 }
 
@@ -362,7 +362,7 @@ impl SynthSink for Sink<'_> {
 pub fn parameters(voice: &VoiceSettings, host: &SpeechSettings) -> Parameters {
     Parameters {
         rate: voice.words_per_minute() as i32,
-        volume: voice.volume.min(200) as i32,
+        volume: voice.volume.min(100) as i32,
         pitch: voice.pitch.min(100) as i32,
         range: 50,
         punctuation: match host.punctuation {
@@ -471,7 +471,7 @@ mod tests {
         let parameters = parameters(&voice, &host);
         assert_eq!(parameters.rate, 795);
         assert_eq!(parameters.pitch, 70);
-        assert_eq!(parameters.volume, 150);
+        assert_eq!(parameters.volume, 100);
         assert_eq!(parameters.capitals, 1);
     }
 

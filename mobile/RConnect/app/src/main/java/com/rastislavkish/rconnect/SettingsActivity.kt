@@ -175,7 +175,7 @@ class SettingsActivity : ComponentActivity() {
                 PercentSlider(
                     label = getString(R.string.volume),
                     value = current.volume.toInt(),
-                    max = 200,
+                    max = 100,
                     state = getString(R.string.percent, current.volume.toInt()),
                 ) { value -> update { it.copy(volume = value.toUByte()) } }
 

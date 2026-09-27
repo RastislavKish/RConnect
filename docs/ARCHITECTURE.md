@@ -291,8 +291,8 @@ Implemented in `mobile/core/src/speech/`:
     `espeak-ng-data` (141 languages, 104 variants), and selected as `language+variant`.
   - **Rate:** 0–100 %, mapped like NVDA to 80–450 wpm. **Rate boost** triples it, to
     240–1350 wpm; eSpeak NG hands speeds of 450 wpm and more to sonic.
-  - **Pitch:** 0–100, where 50 is normal. **Volume:** 0–200 %, where 100 % is eSpeak NG's
-    normal volume.
+  - **Pitch:** 0–100, where 50 is normal. **Volume:** 0–100, where 100 is eSpeak NG's
+    normal volume. All three scales run 0–100 in 5 % steps, as in NVDA and Orca.
   - **From the computer:** punctuation and capital letters still come from its settings,
     because they follow the screen reader's behaviour. Its rate, pitch, volume and
     language are ignored, like NVDA Remote uses the controlling machine's synthesizer
