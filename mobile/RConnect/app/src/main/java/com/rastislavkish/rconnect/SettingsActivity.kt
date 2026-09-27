@@ -58,6 +58,11 @@ import uniffi.rconnect_ffi.wordsPerMinute
 /** Speech and audio settings, with a button to hear the result. */
 class SettingsActivity : ComponentActivity() {
 
+    private companion object {
+        /** Slider increment, in percent. */
+        const val STEP = 5
+    }
+
     private var speechData: File? = null
     private var settings by mutableStateOf<VoiceSettings?>(null)
     private var voices by mutableStateOf<List<VoiceOption>>(emptyList())
@@ -235,7 +240,7 @@ class SettingsActivity : ComponentActivity() {
         }
     }
 
-    /** A slider in steps of one, announced as `label` with its state, e.g. "40 percent". */
+    /** A slider in steps of five, announced as `label` with its state, e.g. "40 percent". */
     @Composable
     private fun PercentSlider(
         label: String,
@@ -248,9 +253,9 @@ class SettingsActivity : ComponentActivity() {
             Text("$label: $state")
             Slider(
                 value = value.toFloat(),
-                onValueChange = { onChange(it.roundToInt().coerceIn(0, max)) },
+                onValueChange = { onChange((it / STEP).roundToInt() * STEP) },
                 valueRange = 0f..max.toFloat(),
-                steps = max - 1,
+                steps = max / STEP - 1,
                 modifier = Modifier.semantics {
                     contentDescription = label
                     stateDescription = state

@@ -59,8 +59,8 @@ impl Default for VoiceSettings {
         VoiceSettings {
             voice: "en-us".into(),
             variant: None,
-            // eSpeak NG's normal speed, 175 words per minute.
-            rate: 26,
+            // NVDA's default for eSpeak NG, 265 words per minute.
+            rate: 50,
             rate_boost: false,
             pitch: 50,
             volume: 100,
@@ -458,7 +458,7 @@ mod tests {
             ..Default::default()
         };
         let mut voice = VoiceSettings::default();
-        assert_eq!(voice.words_per_minute(), 176);
+        assert_eq!(voice.words_per_minute(), 265);
         voice.rate = 0;
         assert_eq!(voice.words_per_minute(), 80);
         voice.rate = 100;
