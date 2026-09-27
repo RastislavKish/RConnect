@@ -4,6 +4,11 @@
 //! and the list of hosts, captures keys, and plays speech; this crate does the networking.
 //! Bindings for Kotlin will be added on top of this API.
 
+mod driver;
+pub mod speech;
+
+pub use driver::{SessionInput, SessionObserver, SpeechConfig, drive_session};
+
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::Duration;
@@ -209,7 +214,10 @@ impl Controller {
         keys.set_priority(KEYS_PRIORITY)
             .context("cannot open keys stream")?;
         let (speech_send, speech_recv) =
-            connection.accept_bi().await.context("no speech stream")?;
+            tokio::time::timeout(Duration::from_secs(10), connection.accept_bi())
+                .await
+                .context("no speech stream from the computer")?
+                .context("no speech stream from the computer")?;
 
         let (output_tx, output_rx) = mpsc::unbounded_channel();
         tokio::spawn(read_speech(BufReader::new(speech_recv), output_tx.clone()));
@@ -243,6 +251,8 @@ impl Controller {
 pub enum SessionEnd {
     /// The host ended it.
     ByHost(EndReason),
+    /// It was ended on this device.
+    ByController,
     /// The connection was lost.
     ConnectionLost,
 }

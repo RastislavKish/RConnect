@@ -1,5 +1,5 @@
 //! Development stand-in for the phone app: pairs with a host and runs sessions from a
-//! terminal, printing speech and simulating playback.
+//! terminal, speaking through eSpeak NG like the app does and printing the text.
 //!
 //! ```text
 //! rconnect-dev-controller pair '<rconnect://pair?... URI>'
@@ -13,21 +13,26 @@
 //! release, `t text` types lowercase letters, digits and spaces, `end` ends the session.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use anyhow::Context;
-use rconnect_core::{Controller, Host, SessionEnd, SessionOutput};
-use rconnect_protocol::messages::{KeyMessage, SpeechCommand, SpeechEvent, Utterance};
+use rconnect_core::{Controller, Host, SessionInput, SessionObserver, SpeechConfig, drive_session};
+use rconnect_protocol::messages::KeyMessage;
 use rconnect_protocol::ticket::PairingTicket;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 const DEVICE_NAME: &str = "Dev controller";
-const MS_PER_CHAR: u64 = 50;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "rconnect_core=info".into()),
+        )
+        .with_writer(std::io::stderr)
+        .init();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dir = data_dir();
     std::fs::create_dir_all(&dir)?;
@@ -77,85 +82,48 @@ async fn pair(controller: &Controller, dir: &std::path::Path, uri: &str) -> anyh
 
 async fn session(controller: &Controller, host: &Host) -> anyhow::Result<()> {
     let started = Instant::now();
-    let mut session = controller.start_session(host).await?;
+    let session = controller.start_session(host).await?;
     println!(
         "Session with {} started in {:?}.",
         session.host_name,
         started.elapsed()
     );
-    let mut outputs = session.take_outputs().expect("first call");
 
-    let (line_tx, mut lines) = mpsc::unbounded_channel();
+    let data_dir = rconnect_core::speech::espeak::dev_data()
+        .context("no eSpeak NG data; build natively")?
+        .to_path_buf();
+    let (input_tx, inputs) = mpsc::unbounded_channel();
     tokio::spawn(async move {
         let mut stdin = BufReader::new(tokio::io::stdin()).lines();
         while let Ok(Some(line)) = stdin.next_line().await {
-            if line_tx.send(line).is_err() {
-                break;
+            match parse_command(&line) {
+                Some(Command::Keys(keys)) => {
+                    for key in keys {
+                        let _ = input_tx.send(SessionInput::Key(key));
+                    }
+                }
+                Some(Command::End) => break,
+                None => println!("? commands: k <codes>, d <code>, u <code>, t <text>, end"),
             }
         }
+        let _ = input_tx.send(SessionInput::End);
     });
-    let (event_tx, mut events) = mpsc::unbounded_channel();
-    let mut playback: Option<tokio::task::JoinHandle<()>> = None;
 
-    loop {
-        tokio::select! {
-            output = outputs.recv() => match output {
-                Some(SessionOutput::Speech(command)) => match command {
-                    SpeechCommand::Speak(utterance) => {
-                        println!("> {}", utterance.text);
-                        if let Some(previous) = playback.take() {
-                            previous.abort();
-                        }
-                        playback = Some(tokio::spawn(play(utterance, event_tx.clone())));
-                    }
-                    SpeechCommand::Stop { .. } | SpeechCommand::Pause { .. } => {
-                        if let Some(previous) = playback.take() {
-                            previous.abort();
-                        }
-                    }
-                    SpeechCommand::Settings(settings) => println!("(settings: {settings:?})"),
-                },
-                Some(SessionOutput::Ended(end)) => {
-                    println!("Session ended: {end:?}");
-                    return Ok(());
-                }
-                None => {
-                    println!("Session ended: {:?}", SessionEnd::ConnectionLost);
-                    return Ok(());
-                }
-            },
-            Some(event) = events.recv() => session.send_speech_event(event).await?,
-            line = lines.recv() => {
-                let Some(line) = line else { break };
-                match parse_command(&line) {
-                    Some(Command::Keys(messages)) => {
-                        for message in messages {
-                            session.send_key(message).await?;
-                        }
-                    }
-                    Some(Command::End) => break,
-                    None => println!("? commands: k <codes>, d <code>, u <code>, t <text>, end"),
-                }
-            }
-        }
-    }
-    session.end().await;
-    println!("Session ended.");
+    let speech = SpeechConfig {
+        data_dir,
+        keep_alive: false,
+    };
+    let end = drive_session(session, inputs, speech, &Printer).await;
+    println!("Session ended: {end:?}");
     Ok(())
 }
 
-async fn play(utterance: Utterance, events: mpsc::UnboundedSender<SpeechEvent>) {
-    let start = Instant::now();
-    let per_char = Duration::from_millis(MS_PER_CHAR);
-    for mark in &utterance.marks {
-        tokio::time::sleep_until(start + per_char * mark.offset).await;
-        let _ = events.send(SpeechEvent::Mark {
-            id: utterance.id,
-            index: mark.index,
-        });
+struct Printer;
+
+impl SessionObserver for Printer {
+    fn speech(&self, text: &str) {
+        println!("> {text}");
     }
-    tokio::time::sleep_until(start + per_char * utterance.text.chars().count() as u32).await;
-    let _ = events.send(SpeechEvent::End { id: utterance.id });
 }
 
 enum Command {

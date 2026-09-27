@@ -60,9 +60,10 @@ impl SpeechHub {
     /// Routes speech to a session. `token` identifies the session in [`Self::detach`].
     pub fn attach(&self, token: u64, sink: SpeechSink, mode: OutputMode) {
         let mut inner = self.inner.lock().unwrap();
-        if let Some(settings) = &inner.settings {
-            let _ = sink.send(SpeechCommand::Settings(settings.clone()));
-        }
+        // Always sent, even before the module has reported settings: the speech stream
+        // only becomes visible to the controller once something is written to it.
+        let settings = inner.settings.clone().unwrap_or_default();
+        let _ = sink.send(SpeechCommand::Settings(settings));
         inner.session = Some(Attached { token, sink, mode });
         inner.send_to_module(DaemonMessage::SetMode(mode));
     }
