@@ -6,11 +6,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use rconnect_core::speech::{self, SpeechEngine};
 use rconnect_core::{
     ConnectError, Controller, Host, PairError, SessionEnd, SessionInput, SessionObserver,
     SpeechConfig, drive_session,
 };
-use rconnect_protocol::messages::{EndReason, KeyMessage};
+use rconnect_protocol::messages::{EndReason, KeyMessage, SpeechKind, Utterance};
 use rconnect_protocol::ticket::PairingTicket;
 use rconnect_protocol::{hex, words};
 use tokio::sync::mpsc;
@@ -172,6 +173,7 @@ impl RConnect {
         &self,
         host_id: String,
         speech_data_dir: String,
+        voice: VoiceSettings,
         keep_alive: bool,
         listener: Arc<dyn SessionListener>,
     ) -> Result<Arc<SessionHandle>, RConnectError> {
@@ -188,6 +190,7 @@ impl RConnect {
         let (inputs_tx, inputs) = mpsc::unbounded_channel();
         let speech = SpeechConfig {
             data_dir: PathBuf::from(speech_data_dir),
+            voice: voice.into(),
             keep_alive,
         };
         tokio::spawn(async move {
@@ -225,6 +228,129 @@ impl SessionHandle {
     /// Ends the session; the listener's `on_ended` follows.
     pub fn end(&self) {
         let _ = self.inputs.send(SessionInput::End);
+    }
+}
+
+/// The phone's speech settings; see the settings screen.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct VoiceSettings {
+    /// Language voice id, e.g. `en-us`.
+    pub voice: String,
+    /// Variant id, e.g. `klatt`, or none.
+    pub variant: Option<String>,
+    /// 0..=100, mapped to 80..=450 words per minute.
+    pub rate: u8,
+    /// Triples the rate.
+    pub rate_boost: bool,
+    /// 0..=100, 50 is normal.
+    pub pitch: u8,
+    /// 0..=200, 100 is normal.
+    pub volume: u8,
+}
+
+impl From<VoiceSettings> for speech::VoiceSettings {
+    fn from(v: VoiceSettings) -> Self {
+        speech::VoiceSettings {
+            voice: v.voice,
+            variant: v.variant,
+            rate: v.rate,
+            rate_boost: v.rate_boost,
+            pitch: v.pitch,
+            volume: v.volume,
+        }
+    }
+}
+
+/// The default speech settings.
+#[uniffi::export]
+pub fn default_voice_settings() -> VoiceSettings {
+    let d = speech::VoiceSettings::default();
+    VoiceSettings {
+        voice: d.voice,
+        variant: d.variant,
+        rate: d.rate,
+        rate_boost: d.rate_boost,
+        pitch: d.pitch,
+        volume: d.volume,
+    }
+}
+
+/// Speaking rate in words per minute for the given settings.
+#[uniffi::export]
+pub fn words_per_minute(settings: VoiceSettings) -> u32 {
+    speech::VoiceSettings::from(settings).words_per_minute()
+}
+
+/// A language voice or variant offered in the settings.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct VoiceOption {
+    pub id: String,
+    pub name: String,
+}
+
+/// Language voices in the speech data directory, sorted by name.
+#[uniffi::export]
+pub fn list_voices(speech_data_dir: String) -> Vec<VoiceOption> {
+    speech::voices::list_voices(Path::new(&speech_data_dir))
+        .into_iter()
+        .map(|v| VoiceOption {
+            id: v.id,
+            name: v.name,
+        })
+        .collect()
+}
+
+/// Voice variants in the speech data directory, sorted by name.
+#[uniffi::export]
+pub fn list_variants(speech_data_dir: String) -> Vec<VoiceOption> {
+    speech::voices::list_variants(Path::new(&speech_data_dir))
+        .into_iter()
+        .map(|v| VoiceOption {
+            id: v.id,
+            name: v.name,
+        })
+        .collect()
+}
+
+/// Speaks samples with the settings being edited. eSpeak NG can run only once per
+/// process, so the preview must be closed before a session starts.
+#[derive(uniffi::Object)]
+pub struct SpeechPreview {
+    engine: Mutex<Option<SpeechEngine>>,
+    next_id: std::sync::atomic::AtomicU32,
+}
+
+#[uniffi::export]
+impl SpeechPreview {
+    #[uniffi::constructor]
+    pub fn new(speech_data_dir: String, voice: VoiceSettings) -> Result<Arc<Self>, RConnectError> {
+        let (engine, _events) =
+            SpeechEngine::start(PathBuf::from(speech_data_dir), voice.into(), false)?;
+        Ok(Arc::new(SpeechPreview {
+            engine: Mutex::new(Some(engine)),
+            next_id: std::sync::atomic::AtomicU32::new(1),
+        }))
+    }
+
+    /// Speaks `text` with `voice`, interrupting any previous sample.
+    pub fn speak(&self, voice: VoiceSettings, text: String) {
+        if let Some(engine) = self.engine.lock().unwrap().as_ref() {
+            engine.set_voice(voice.into());
+            let id = self
+                .next_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            engine.speak(Utterance {
+                id,
+                kind: SpeechKind::Text,
+                text,
+                marks: Vec::new(),
+            });
+        }
+    }
+
+    /// Stops the engine and releases eSpeak NG and the audio output.
+    pub fn shutdown(&self) {
+        self.engine.lock().unwrap().take();
     }
 }
 

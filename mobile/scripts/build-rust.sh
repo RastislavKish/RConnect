@@ -14,3 +14,5 @@ targets=""
 for abi in "$@"; do targets="$targets -t $abi"; done
 # shellcheck disable=SC2086
 cargo ndk $targets -P 28 -o "$out" build --release -p rconnect-ffi --lib
+# cargo-ndk also copies shared libraries some dependencies build; only ours is needed.
+find "$out" -name '*.so' ! -name 'librconnect_ffi.so' -delete

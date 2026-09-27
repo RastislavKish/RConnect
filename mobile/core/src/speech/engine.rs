@@ -31,7 +31,58 @@ enum Command {
         utterance: Utterance,
     },
     Settings(SpeechSettings),
+    Voice(VoiceSettings),
     Shutdown,
+}
+
+/// The phone's own speech settings. They decide the voice, rate, pitch and volume; the
+/// computer's settings still decide punctuation and capital letters, which follow the
+/// screen reader's behaviour.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoiceSettings {
+    /// Language voice, e.g. `en-us` (see [`super::voices::list_voices`]).
+    pub voice: String,
+    /// Variant, e.g. `klatt` (see [`super::voices::list_variants`]).
+    pub variant: Option<String>,
+    /// 0..=100, mapped to 80..=450 words per minute like NVDA does.
+    pub rate: u8,
+    /// Triples the rate, like NVDA's rate boost; speeds above 450 use libsonic.
+    pub rate_boost: bool,
+    /// 0..=100, 50 is eSpeak NG's normal pitch.
+    pub pitch: u8,
+    /// 0..=200, 100 is eSpeak NG's normal volume.
+    pub volume: u8,
+}
+
+impl Default for VoiceSettings {
+    fn default() -> VoiceSettings {
+        VoiceSettings {
+            voice: "en-us".into(),
+            variant: None,
+            // eSpeak NG's normal speed, 175 words per minute.
+            rate: 26,
+            rate_boost: false,
+            pitch: 50,
+            volume: 100,
+        }
+    }
+}
+
+impl VoiceSettings {
+    pub fn words_per_minute(&self) -> u32 {
+        const MINIMUM: u32 = 80;
+        const MAXIMUM: u32 = 450;
+        let wpm = MINIMUM + self.rate.min(100) as u32 * (MAXIMUM - MINIMUM) / 100;
+        if self.rate_boost { wpm * 3 } else { wpm }
+    }
+
+    /// The name eSpeak NG selects the voice by, e.g. `sk+klatt`.
+    fn espeak_voice(&self) -> String {
+        match &self.variant {
+            Some(variant) => format!("{}+{variant}", self.voice),
+            None => self.voice.clone(),
+        }
+    }
 }
 
 pub struct SpeechEngine {
@@ -46,6 +97,7 @@ impl SpeechEngine {
     /// the returned receiver as the audio is played.
     pub fn start(
         data_dir: PathBuf,
+        voice: VoiceSettings,
         keep_alive: bool,
     ) -> anyhow::Result<(SpeechEngine, UnboundedReceiver<SpeechEvent>)> {
         let (events_tx, events_rx) = unbounded_channel();
@@ -62,7 +114,7 @@ impl SpeechEngine {
             std::thread::Builder::new()
                 .name("speech".into())
                 .spawn(move || {
-                    let worker = match Worker::new(&data_dir, playback, generation) {
+                    let worker = match Worker::new(&data_dir, voice, playback, generation) {
                         Ok(worker) => {
                             let _ = ready_tx.send(Ok(()));
                             worker
@@ -108,8 +160,14 @@ impl SpeechEngine {
         self.playback.lock().unwrap().last_mark(id)
     }
 
+    /// The computer's speech settings.
     pub fn set_settings(&self, settings: SpeechSettings) {
         let _ = self.commands.send(Command::Settings(settings));
+    }
+
+    /// The phone's speech settings.
+    pub fn set_voice(&self, voice: VoiceSettings) {
+        let _ = self.commands.send(Command::Voice(voice));
     }
 
     pub fn set_keep_alive(&self, keep_alive: bool) {
@@ -138,25 +196,29 @@ struct Worker {
     output: Output,
     playback: Arc<Mutex<Playback>>,
     generation: Arc<AtomicU64>,
-    voice: String,
+    voice: VoiceSettings,
+    host: SpeechSettings,
 }
 
 impl Worker {
     fn new(
         data_dir: &std::path::Path,
+        voice: VoiceSettings,
         playback: Arc<Mutex<Playback>>,
         generation: Arc<AtomicU64>,
     ) -> anyhow::Result<Worker> {
         let espeak = Espeak::new(data_dir, CHUNK_MS)?;
-        espeak.set_parameters(&parameters(&SpeechSettings::default()))?;
         let output = Output::open(espeak.sample_rate(), playback.clone())?;
-        Ok(Worker {
+        let mut worker = Worker {
             espeak,
             output,
             playback,
             generation,
-            voice: "en".into(),
-        })
+            voice: VoiceSettings::default(),
+            host: SpeechSettings::default(),
+        };
+        worker.set_voice(voice);
+        Ok(worker)
     }
 
     fn run(mut self, commands: Receiver<Command>) {
@@ -174,7 +236,11 @@ impl Worker {
                     generation,
                     utterance,
                 } => self.speak(generation, utterance),
-                Command::Settings(settings) => self.apply_settings(&settings),
+                Command::Settings(settings) => {
+                    self.host = settings;
+                    self.apply_parameters();
+                }
+                Command::Voice(voice) => self.set_voice(voice),
                 Command::Shutdown => return,
             }
         }
@@ -193,21 +259,23 @@ impl Worker {
         }
     }
 
-    fn apply_settings(&mut self, settings: &SpeechSettings) {
-        let voice = settings
-            .synthesis_voice
-            .clone()
-            .or_else(|| settings.language.clone())
-            .map(|voice| voice.to_ascii_lowercase())
-            .unwrap_or_else(|| "en".into());
-        if voice != self.voice {
-            match self.espeak.set_voice(&voice) {
-                Ok(()) => self.voice = voice,
-                Err(e) => tracing::warn!("cannot select voice {voice:?}: {e}"),
-            }
+    fn set_voice(&mut self, voice: VoiceSettings) {
+        let name = voice.espeak_voice();
+        if let Err(e) = self.espeak.set_voice(&name) {
+            tracing::warn!("cannot select voice {name:?}: {e}");
+            // Keep the language when only the variant is missing.
+            let _ = self.espeak.set_voice(&voice.voice);
         }
-        // Voice changes reset parameters, so they are always applied afterwards.
-        if let Err(e) = self.espeak.set_parameters(&parameters(settings)) {
+        self.voice = voice;
+        // Selecting a voice resets the parameters.
+        self.apply_parameters();
+    }
+
+    fn apply_parameters(&mut self) {
+        if let Err(e) = self
+            .espeak
+            .set_parameters(&parameters(&self.voice, &self.host))
+        {
             tracing::warn!("cannot apply speech settings: {e}");
         }
     }
@@ -290,28 +358,19 @@ impl SynthSink for Sink<'_> {
     }
 }
 
-/// Maps speech-dispatcher's settings to eSpeak NG's parameters, the way speech-dispatcher's
-/// own espeak-ng module does it in spirit: 0 is eSpeak NG's default, ±100 its limits.
-pub fn parameters(settings: &SpeechSettings) -> Parameters {
-    const NORMAL: i32 = 175;
-    const MINIMUM: i32 = 80;
-    const MAXIMUM: i32 = 450;
-    let rate = settings.rate as i32;
+/// Combines the phone's settings with the computer's into eSpeak NG's parameters.
+pub fn parameters(voice: &VoiceSettings, host: &SpeechSettings) -> Parameters {
     Parameters {
-        rate: if rate < 0 {
-            NORMAL + rate * (NORMAL - MINIMUM) / 100
-        } else {
-            NORMAL + rate * (MAXIMUM - NORMAL) / 100
-        },
-        volume: 100 + settings.volume as i32,
-        pitch: 50 + settings.pitch as i32 / 2,
-        range: 50 + settings.pitch_range as i32 / 2,
-        punctuation: match settings.punctuation {
+        rate: voice.words_per_minute() as i32,
+        volume: voice.volume.min(200) as i32,
+        pitch: voice.pitch.min(100) as i32,
+        range: 50,
+        punctuation: match host.punctuation {
             Punctuation::None => 0,
             Punctuation::All => 1,
             Punctuation::Some | Punctuation::Most => 2,
         },
-        capitals: match settings.capital_letters {
+        capitals: match host.capital_letters {
             CapitalLetters::None => 0,
             CapitalLetters::Icon => 1,
             CapitalLetters::Spell => 2,
@@ -394,18 +453,36 @@ mod tests {
 
     #[test]
     fn parameter_mapping() {
-        let mut settings = SpeechSettings::default();
-        assert_eq!(parameters(&settings).rate, 175);
-        settings.rate = 100;
-        assert_eq!(parameters(&settings).rate, 450);
-        settings.rate = -100;
-        assert_eq!(parameters(&settings).rate, 80);
-        settings.rate = 50;
-        settings.pitch = -100;
-        settings.volume = 100;
-        let parameters = parameters(&settings);
-        assert_eq!(parameters.rate, 312);
-        assert_eq!(parameters.pitch, 0);
-        assert_eq!(parameters.volume, 200);
+        let host = SpeechSettings {
+            capital_letters: CapitalLetters::Icon,
+            ..Default::default()
+        };
+        let mut voice = VoiceSettings::default();
+        assert_eq!(voice.words_per_minute(), 176);
+        voice.rate = 0;
+        assert_eq!(voice.words_per_minute(), 80);
+        voice.rate = 100;
+        assert_eq!(voice.words_per_minute(), 450);
+        voice.rate_boost = true;
+        assert_eq!(voice.words_per_minute(), 1350);
+        voice.rate = 50;
+        voice.pitch = 70;
+        voice.volume = 150;
+        let parameters = parameters(&voice, &host);
+        assert_eq!(parameters.rate, 795);
+        assert_eq!(parameters.pitch, 70);
+        assert_eq!(parameters.volume, 150);
+        assert_eq!(parameters.capitals, 1);
+    }
+
+    #[test]
+    fn espeak_voice_names() {
+        let mut voice = VoiceSettings {
+            voice: "sk".into(),
+            ..Default::default()
+        };
+        assert_eq!(voice.espeak_voice(), "sk");
+        voice.variant = Some("klatt".into());
+        assert_eq!(voice.espeak_voice(), "sk+klatt");
     }
 }

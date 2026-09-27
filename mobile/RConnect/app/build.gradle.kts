@@ -74,6 +74,7 @@ val espeakAssets = layout.buildDirectory.dir("rust/assets")
 val buildRust by tasks.registering(Exec::class) {
     description = "Builds the Rust core for Android"
     inputs.files(rustSources.map { fileTree(it) { exclude("target") } })
+    inputs.file(scripts.resolve("build-rust.sh"))
     outputs.dir(rustJniLibs)
     commandLine(scripts.resolve("build-rust.sh"), rustJniLibs.get().asFile)
 }
@@ -81,6 +82,7 @@ val buildRust by tasks.registering(Exec::class) {
 val generateBindings by tasks.registering(Exec::class) {
     description = "Generates the Kotlin bindings of the Rust core"
     inputs.files(rustSources.map { fileTree(it) { exclude("target") } })
+    inputs.file(scripts.resolve("generate-bindings.sh"))
     outputs.dir(rustBindings)
     commandLine(scripts.resolve("generate-bindings.sh"), rustBindings.get().asFile)
 }
@@ -89,6 +91,7 @@ val buildEspeakData by tasks.registering(Exec::class) {
     description = "Compiles eSpeak NG's voice data"
     inputs.dir(rootDir.resolve("../third_party/espeak-ng/dictsource"))
     inputs.dir(rootDir.resolve("../third_party/espeak-ng/phsource"))
+    inputs.file(scripts.resolve("build-espeak-data.sh"))
     outputs.dir(espeakAssets)
     commandLine(scripts.resolve("build-espeak-data.sh"), espeakAssets.get().asFile)
 }

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use rconnect_protocol::messages::{KeyMessage, SpeechCommand, SpeechEvent};
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use crate::speech::SpeechEngine;
+use crate::speech::{SpeechEngine, VoiceSettings};
 use crate::{Session, SessionEnd, SessionOutput};
 
 /// What the user interface sends to a running session.
@@ -20,6 +20,8 @@ pub enum SessionInput {
 pub struct SpeechConfig {
     /// Directory containing `espeak-ng-data`.
     pub data_dir: PathBuf,
+    /// The phone's voice, rate, pitch and volume.
+    pub voice: VoiceSettings,
     /// Play inaudible noise between utterances to keep Bluetooth headphones awake.
     pub keep_alive: bool,
 }
@@ -39,13 +41,14 @@ pub async fn drive_session(
     let mut outputs = session
         .take_outputs()
         .expect("the session's outputs are unused");
-    let (engine, mut events) = match SpeechEngine::start(speech.data_dir, speech.keep_alive) {
-        Ok((engine, events)) => (Some(engine), Some(events)),
-        Err(e) => {
-            tracing::error!("speech is unavailable: {e:#}");
-            (None, None)
-        }
-    };
+    let (engine, mut events) =
+        match SpeechEngine::start(speech.data_dir, speech.voice, speech.keep_alive) {
+            Ok((engine, events)) => (Some(engine), Some(events)),
+            Err(e) => {
+                tracing::error!("speech is unavailable: {e:#}");
+                (None, None)
+            }
+        };
 
     loop {
         tokio::select! {

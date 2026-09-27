@@ -82,7 +82,7 @@ local_speech = true
 
 Requirements: the Android SDK and NDK, Rust with the `aarch64-linux-android` and
 `x86_64-linux-android` targets, `cargo-ndk`, CMake and a C compiler. Check out the eSpeak
-NG submodule first:
+NG and sonic submodules first:
 
 ```sh
 git submodule update --init

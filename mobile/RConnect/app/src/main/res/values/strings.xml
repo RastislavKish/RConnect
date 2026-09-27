@@ -28,5 +28,23 @@
     <string name="connection_failed">Connection failed.</string>
     <string name="end_session">End session</string>
 
+    <string name="settings">Settings</string>
+    <string name="speech">Speech</string>
+    <string name="audio">Audio</string>
+    <string name="loading">Loading…</string>
+    <string name="voice">Voice</string>
+    <string name="voice_value">Voice: %1$s</string>
+    <string name="variant">Variant</string>
+    <string name="variant_value">Variant: %1$s</string>
+    <string name="no_variant">None</string>
+    <string name="rate">Rate</string>
+    <string name="rate_state">%1$d percent, %2$d words per minute</string>
+    <string name="rate_boost">Rate boost</string>
+    <string name="pitch">Pitch</string>
+    <string name="volume">Volume</string>
+    <string name="percent">%1$d percent</string>
+    <string name="test_speech">Test speech</string>
+    <string name="sample_text">This is how your computer will sound through RConnect.</string>
+
     <string name="service_description">Sends keys to the computer during an RConnect session, including shortcuts the system would otherwise handle. Outside a session it does nothing.</string>
 </resources>

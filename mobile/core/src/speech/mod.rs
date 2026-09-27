@@ -5,5 +5,6 @@ mod audio;
 pub mod engine;
 pub mod espeak;
 mod playback;
+pub mod voices;
 
-pub use engine::SpeechEngine;
+pub use engine::{SpeechEngine, VoiceSettings};

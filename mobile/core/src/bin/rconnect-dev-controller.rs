@@ -15,6 +15,7 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
+use rconnect_core::speech::VoiceSettings;
 use rconnect_core::{Controller, Host, SessionInput, SessionObserver, SpeechConfig, drive_session};
 use rconnect_protocol::messages::KeyMessage;
 use rconnect_protocol::ticket::PairingTicket;
@@ -111,6 +112,7 @@ async fn session(controller: &Controller, host: &Host) -> anyhow::Result<()> {
 
     let speech = SpeechConfig {
         data_dir,
+        voice: VoiceSettings::default(),
         keep_alive: false,
     };
     let end = drive_session(session, inputs, speech, &Printer).await;

@@ -5,13 +5,17 @@ import android.content.Context
 import android.os.Build
 import android.provider.Settings as SystemSettings
 import java.io.File
+import java.util.Locale
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import uniffi.rconnect_ffi.RConnect
+import uniffi.rconnect_ffi.VoiceSettings
+import uniffi.rconnect_ffi.defaultVoiceSettings
 import uniffi.rconnect_ffi.initLogging
+import uniffi.rconnect_ffi.listVoices
 
 /** Holds the Rust core and the speech data for the whole app. */
 class RConnectApp : Application() {
@@ -57,4 +61,38 @@ class AppSettings(context: Context) {
     var keepAlive: Boolean
         get() = preferences.getBoolean("keep_alive", false)
         set(value) = preferences.edit().putBoolean("keep_alive", value).apply()
+
+    /**
+     * The speech settings. Until the user picks a voice, the one matching the phone's
+     * language is used, if eSpeak NG has it.
+     */
+    fun voiceSettings(speechData: File): VoiceSettings {
+        val defaults = defaultVoiceSettings()
+        return VoiceSettings(
+            voice = preferences.getString("voice", null) ?: localeVoice(speechData) ?: defaults.voice,
+            variant = preferences.getString("variant", null),
+            rate = preferences.getInt("rate", defaults.rate.toInt()).toUByte(),
+            rateBoost = preferences.getBoolean("rate_boost", defaults.rateBoost),
+            pitch = preferences.getInt("pitch", defaults.pitch.toInt()).toUByte(),
+            volume = preferences.getInt("volume", defaults.volume.toInt()).toUByte(),
+        )
+    }
+
+    fun setVoiceSettings(settings: VoiceSettings) {
+        preferences.edit()
+            .putString("voice", settings.voice)
+            .putString("variant", settings.variant)
+            .putInt("rate", settings.rate.toInt())
+            .putBoolean("rate_boost", settings.rateBoost)
+            .putInt("pitch", settings.pitch.toInt())
+            .putInt("volume", settings.volume.toInt())
+            .apply()
+    }
+
+    private fun localeVoice(speechData: File): String? {
+        val locale = Locale.getDefault()
+        val ids = listVoices(speechData.path).map { it.id }.toSet()
+        val tag = locale.toLanguageTag().lowercase()
+        return listOf(tag, locale.language.lowercase()).firstOrNull { it in ids }
+    }
 }

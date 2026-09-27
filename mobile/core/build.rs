@@ -1,8 +1,9 @@
 //! Builds eSpeak NG from `mobile/third_party/espeak-ng` as a static C library.
 //!
 //! Only the C parts are built: no speech-player (C++), no async mode (the speech engine
-//! drives eSpeak NG from its own thread), no audio output (the engine plays the samples),
-//! no MBROLA and no libsonic.
+//! drives eSpeak NG from its own thread), no audio output (the engine plays the samples)
+//! and no MBROLA. libsonic, for rates above 450 words per minute, comes from
+//! `mobile/third_party/sonic`.
 //!
 //! Voice data (`espeak-ng-data`) can only be compiled by an eSpeak NG that runs on the
 //! build machine, so it is built for native builds only. The path is exported to the
@@ -14,12 +15,13 @@ use std::path::PathBuf;
 fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let source = manifest.join("../third_party/espeak-ng");
+    let sonic = manifest.join("../third_party/sonic");
     println!("cargo:rerun-if-changed={}", source.join("src").display());
     println!("cargo:rerun-if-changed=build.rs");
-    if !source.join("CMakeLists.txt").exists() {
+    if !source.join("CMakeLists.txt").exists() || !sonic.join("sonic.c").exists() {
         panic!(
-            "eSpeak NG sources are missing in {}; run `git submodule update --init`",
-            source.display()
+            "eSpeak NG or sonic sources are missing in {}; run `git submodule update --init`",
+            source.parent().unwrap().display()
         );
     }
 
@@ -33,7 +35,11 @@ fn main() {
         .define("USE_KLATT", "ON")
         .define("USE_ASYNC", "OFF")
         .define("USE_MBROLA", "OFF")
-        .define("USE_LIBSONIC", "OFF")
+        // Sonic speeds up speech beyond 450 words per minute. eSpeak NG's CMake would
+        // download it; the vendored copy is used instead, without network access.
+        .define("USE_LIBSONIC", "ON")
+        .define("FETCHCONTENT_SOURCE_DIR_SONIC-GIT", &sonic)
+        .define("FETCHCONTENT_FULLY_DISCONNECTED", "ON")
         .define("USE_LIBPCAUDIO", "OFF")
         .define("ESPEAK_BUILD_MANPAGES", "OFF")
         .define("COMPILE_INTONATIONS", "ON");

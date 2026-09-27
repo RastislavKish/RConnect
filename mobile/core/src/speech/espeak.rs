@@ -368,11 +368,45 @@ mod tests {
                 capitals: 1,
             })
             .unwrap();
-        espeak.set_voice("sk").unwrap();
+        espeak.set_voice("sk+klatt").unwrap();
         let mut slovak = Collect::default();
         espeak
             .speak_ssml("<speak>Dobrý deň</speak>", &mut slovak)
             .unwrap();
         assert!(slovak.samples > 0);
+
+        // Rates above 450 words per minute go through libsonic.
+        espeak.set_voice("en-us").unwrap();
+        let text = "<speak>This sentence measures how fast the speech is.</speak>";
+        let length_at = |rate| {
+            let parameters = Parameters {
+                rate,
+                volume: 100,
+                pitch: 50,
+                range: 50,
+                punctuation: 0,
+                capitals: 0,
+            };
+            espeak.set_parameters(&parameters).unwrap();
+            let mut sink = Collect::default();
+            espeak.speak_ssml(text, &mut sink).unwrap();
+            sink.samples
+        };
+        let normal = length_at(450);
+        let boosted = length_at(1350);
+        assert!(
+            boosted * 2 < normal,
+            "450 wpm: {normal} samples, 1350 wpm: {boosted}"
+        );
+
+        // eSpeak NG can be shut down and started again in the same process, as the
+        // settings preview and a session do one after the other.
+        drop(espeak);
+        let espeak = Espeak::new(data, 20).unwrap();
+        let mut again = Collect::default();
+        espeak
+            .speak_ssml("<speak>Again</speak>", &mut again)
+            .unwrap();
+        assert!(again.samples > 0);
     }
 }

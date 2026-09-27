@@ -24,7 +24,9 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import com.rastislavkish.rconnect.ui.theme.RConnectTheme
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import uniffi.rconnect_ffi.RConnectException
 import uniffi.rconnect_ffi.SessionHandle
 import uniffi.rconnect_ffi.SessionListener
@@ -79,9 +81,11 @@ class SessionActivity : ComponentActivity() {
             try {
                 val core = app.core.await()
                 val speechData = app.speechData.await()
+                val voice = withContext(Dispatchers.IO) { app.settings.voiceSettings(speechData) }
                 val handle = core.startSession(
                     hostId,
                     speechData.path,
+                    voice,
                     app.settings.keepAlive,
                     Listener(),
                 )

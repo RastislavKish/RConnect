@@ -259,8 +259,12 @@ Implemented in `mobile/core/src/speech/`:
 
 - **eSpeak NG 1.52.0** is a git submodule (`mobile/third_party/espeak-ng`). `build.rs`
   builds it with CMake as a static C library: no speech-player (C++), async mode, audio
-  output, MBROLA or libsonic. It is driven through a dozen hand-written FFI
-  declarations. Cross builds build only the library target, because upstream's default
+  output or MBROLA. It is driven through a dozen hand-written FFI declarations.
+  **libsonic** (`mobile/third_party/sonic`, Apache 2.0, pinned to the commit eSpeak NG's
+  CMake uses) makes rates above 450 wpm possible. eSpeak NG's CMake would otherwise
+  download sonic while configuring; `FETCHCONTENT_SOURCE_DIR_SONIC-GIT` and
+  `FETCHCONTENT_FULLY_DISCONNECTED` make every build use the vendored copy, without
+  network access, as F-Droid requires. Cross builds build only the library target, because upstream's default
   target compiles voice data with the just-built binary, which can't run on the build
   machine. `mobile/scripts/build-espeak-data.sh` compiles the voice data (19 MB, 8 MB of
   it Russian) natively. The app ships it as assets and copies it to app storage on first
@@ -282,9 +286,20 @@ Implemented in `mobile/core/src/speech/`:
   - Android does not put the Bluetooth link in standby.
 - **Bluetooth keep-alive:** some headsets turn off on pure digital silence. An option
   plays noise at about -69 dBFS instead of zeros.
-- Speech settings from speech-dispatcher are mapped to eSpeak NG: rate -100..0..100 to
-  80..175..450 words per minute; pitch and range around 50; volume around 100. The voice
-  is chosen by name, else by language.
+- **Speech settings are the phone's own** (settings screen, `VoiceSettings`):
+  - **Voice and variant:** chosen from lists read from the voice files in
+    `espeak-ng-data` (141 languages, 104 variants), and selected as `language+variant`.
+  - **Rate:** 0–100 %, mapped like NVDA to 80–450 wpm. **Rate boost** triples it, to
+    240–1350 wpm; eSpeak NG hands speeds of 450 wpm and more to sonic.
+  - **Pitch:** 0–100, where 50 is normal. **Volume:** 0–200 %, where 100 % is eSpeak NG's
+    normal volume.
+  - **From the computer:** punctuation and capital letters still come from its settings,
+    because they follow the screen reader's behaviour. Its rate, pitch, volume and
+    language are ignored, like NVDA Remote uses the controlling machine's synthesizer
+    settings. As a result, Orca's automatic language switching has no effect yet.
+  - **Preview:** a Test button speaks a sample with the settings being edited. eSpeak NG
+    runs once per process, so the preview's engine is shut down whenever the settings
+    screen pauses, before a session can start its own.
 - Measured with the dev controller: through the whole chain, an utterance ends when its
   audio ends (1.68 s for a sentence that takes 1.69 s locally), all marks arrive, and a
   cancel reaches speech-dispatcher in 2 ms.
