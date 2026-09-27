@@ -16,7 +16,11 @@
     <string name="phone_fingerprint">This phone\'s fingerprint: %1$s</string>
     <string name="core_failed">RConnect could not start: %1$s</string>
 
-    <string name="pair_instructions">Run rconnect pair on the computer. Scan the QR code it shows with any QR code scanner app, or paste the pairing link below.</string>
+    <string name="pair_instructions">Run rconnect pair on the computer first. Then pick the computer below if it is on the same network, scan the QR code it shows with any QR code scanner app, or paste the pairing link.</string>
+    <string name="local_computers">Computers on this network</string>
+    <string name="searching">Searching…</string>
+    <string name="pair_with">Pair with %1$s</string>
+    <string name="pair_again_with">Pair again with %1$s, already paired</string>
     <string name="pairing_link">Pairing link</string>
     <string name="pair">Pair</string>
     <string name="pairing_words">Verification words: %1$s. Check that the computer shows the same words, then confirm there.</string>

@@ -27,7 +27,11 @@ enum Command {
     /// Run the RConnect host service, accepting connections from paired phones.
     Daemon,
     /// Pair a phone with this computer.
-    Pair,
+    Pair {
+        /// Show the QR code in an image viewer instead of the terminal.
+        #[arg(long)]
+        window: bool,
+    },
     /// List the paired phones.
     List,
     /// Unpair a phone, given its name or the start of its id.
@@ -75,7 +79,7 @@ fn main() -> anyhow::Result<()> {
                 .init();
             daemon::run()
         }
-        Command::Pair => control::pair(),
+        Command::Pair { window } => control::pair(window),
         Command::List => control::list(),
         Command::Revoke { device } => control::revoke(device),
         Command::Status => control::status(),

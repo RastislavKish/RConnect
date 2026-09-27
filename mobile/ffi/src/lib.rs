@@ -8,12 +8,12 @@ use std::sync::{Arc, Mutex};
 
 use rconnect_core::speech::{self, SpeechEngine};
 use rconnect_core::{
-    ConnectError, Controller, Host, PairError, SessionEnd, SessionInput, SessionObserver,
-    SpeechConfig, drive_session,
+    ConnectError, Controller, Discovery, Host, PairError, SessionEnd, SessionInput,
+    SessionObserver, SpeechConfig, drive_session,
 };
 use rconnect_protocol::messages::{EndReason, KeyMessage, SpeechKind, Utterance};
 use rconnect_protocol::ticket::PairingTicket;
-use rconnect_protocol::{hex, words};
+use rconnect_protocol::{DeviceId, hex, words};
 use tokio::sync::mpsc;
 
 uniffi::setup_scaffolding!();
@@ -151,12 +151,53 @@ impl RConnect {
     pub async fn pair(&self, uri: String) -> Result<HostInfo, RConnectError> {
         let ticket = parse_ticket(&uri)?;
         let host = self.controller.pair(&ticket).await?;
-        let info = HostInfo::from(&host);
-        let mut hosts = self.hosts.lock().unwrap();
-        hosts.retain(|existing| existing.id != host.id);
-        hosts.push(host);
-        save_hosts(&self.data_dir, &hosts)?;
-        Ok(info)
+        self.add_host(host)
+    }
+
+    /// Searches the local network for computers running RConnect until the returned
+    /// handle is stopped. Found computers are reported with their verification words.
+    pub async fn start_discovery(
+        &self,
+        listener: Arc<dyn DiscoveryListener>,
+    ) -> Arc<DiscoveryHandle> {
+        let controller = self.controller.clone();
+        let (found_tx, mut found) = mpsc::unbounded_channel();
+        let search = tokio::spawn({
+            let controller = controller.clone();
+            async move { controller.discover(found_tx).await }
+        });
+        let paired: Vec<DeviceId> = self
+            .hosts
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|host| host.id)
+            .collect();
+        let report = tokio::spawn(async move {
+            while let Some(discovery) = found.recv().await {
+                match discovery {
+                    Discovery::Found { id, name } => listener.on_found(DiscoveredHost {
+                        id: hex::encode(&id),
+                        name,
+                        words: controller.pairing_words(&id).map(String::from).to_vec(),
+                        paired: paired.contains(&id),
+                    }),
+                    Discovery::Lost { id } => listener.on_lost(hex::encode(&id)),
+                }
+            }
+        });
+        Arc::new(DiscoveryHandle {
+            tasks: vec![search, report],
+        })
+    }
+
+    /// Pairs with a computer found on the local network. Returns once the user decided on
+    /// the computer.
+    pub async fn pair_discovered(&self, host_id: String) -> Result<HostInfo, RConnectError> {
+        let id = hex::decode::<32>(&host_id)
+            .ok_or_else(|| RConnectError::Failed("invalid computer id".into()))?;
+        let host = self.controller.pair_discovered(id).await?;
+        self.add_host(host)
     }
 
     /// Forgets a paired computer.
@@ -199,6 +240,56 @@ impl RConnect {
             listener.on_ended(describe_end(&end).into());
         });
         Ok(Arc::new(SessionHandle { inputs: inputs_tx }))
+    }
+}
+
+impl RConnect {
+    fn add_host(&self, host: Host) -> Result<HostInfo, RConnectError> {
+        let info = HostInfo::from(&host);
+        let mut hosts = self.hosts.lock().unwrap();
+        hosts.retain(|existing| existing.id != host.id);
+        hosts.push(host);
+        save_hosts(&self.data_dir, &hosts)?;
+        Ok(info)
+    }
+}
+
+/// A computer found on the local network.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct DiscoveredHost {
+    /// Hex encoded id, passed to `pair_discovered`.
+    pub id: String,
+    pub name: String,
+    /// Verification words for pairing with it; the computer shows the same ones.
+    pub words: Vec<String>,
+    /// Whether this phone is already paired with it.
+    pub paired: bool,
+}
+
+/// Receives the results of a local network search. Called from background threads.
+#[uniffi::export(with_foreign)]
+pub trait DiscoveryListener: Send + Sync {
+    fn on_found(&self, host: DiscoveredHost);
+    /// The computer with this id left the network.
+    fn on_lost(&self, id: String);
+}
+
+/// A running local network search.
+#[derive(uniffi::Object)]
+pub struct DiscoveryHandle {
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+#[uniffi::export]
+impl DiscoveryHandle {
+    pub fn stop(&self) {
+        self.tasks.iter().for_each(|task| task.abort());
+    }
+}
+
+impl Drop for DiscoveryHandle {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 

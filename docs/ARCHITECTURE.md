@@ -329,15 +329,26 @@ device list `{endpoint_id, name, last known addresses}`.
    example 5 minutes) in the daemon, and the prompt is shown in that terminal, where
    Orca reads it.
 2. The phone reaches the laptop through one of two paths:
-   - **QR:** the terminal shows a QR code with
-     `rconnect://pair?id=<EndpointId>&secret=<one-time secret>&relay=…&addr=…`.
-     The one-time secret stops strangers who only know the EndpointId from sending
-     pairing requests.
-   - **LAN discovery:** the phone lists laptops found through mDNS
+   - **LAN discovery:** the phone's pairing screen lists laptops found through mDNS
      (`iroh-mdns-address-lookup` with the service name `rconnect`,
      `MdnsAddressLookup::subscribe()`), and asks each one for its name with
-     `PairRequest::Query`. There is no secret in this case, so the verification words
-     below are the only protection.
+     `PairRequest::Query`. The host answers that query at any time, not only while a
+     pairing window is open. There is no secret in this case, so the verification words
+     below are the only protection. On Android the pairing screen holds a Wi-Fi
+     multicast lock while it is shown, which Android requires for receiving mDNS.
+   - **QR code or link:** `rconnect://pair?id=<base32 EndpointId>&s=<base32 secret>`,
+     about 90 characters. The one-time 80-bit secret stops strangers who only know the
+     EndpointId from sending pairing requests. The link carries no addresses: the phone
+     finds the host by its id, through mDNS on the LAN or iroh's DNS address lookup
+     elsewhere. (`relay` and `addr` parameters are still accepted as optional hints.)
+     Parameter names and values are case-insensitive, in case a scanner changes the
+     case. With low error correction the QR code is 37×37 modules. It is drawn with
+     half-block characters in explicit black-on-white colours, so it scans on light and
+     dark terminal themes, and at 45×23 characters it fits a standard 80×24 terminal. It
+     is printed last, so it stays fully visible. If the terminal is smaller, or with
+     `rconnect pair --window`, it opens as a PNG in an image viewer (Loupe, Eye of GNOME
+     and similar are tried before the desktop's default, which may be an image editor).
+     Tests decode both renderings with zxing-cpp.
 3. The phone sends `PairRequest{secret?, phone_name}`.
 4. **Verification words:** both devices show the same word sequence derived from
    `hash(desktop_id ‖ phone_id)`. Each word encodes 11 bits as an index into a fixed
@@ -358,6 +369,12 @@ checked again later.
 
 `rconnect list` and `rconnect revoke <name|id>` manage the allowlist. Revoking closes any
 session that phone has open.
+
+**Firewalls:** hosts send mDNS announcements repeatedly (about once a second), and
+outgoing packets pass typical desktop firewalls. So the phone finds the host even when
+the host's firewall drops incoming mDNS, as openSUSE's firewalld does by default; the
+host then just doesn't answer the phone's queries, and the phone waits for the next
+announcement. Connections work through the relay and hole punching either way.
 
 ## 5. Protocol
 

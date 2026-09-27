@@ -72,8 +72,10 @@ local_speech = true
 
 ## Commands
 
-- `rconnect pair`: pair a phone. Shows a QR code and the pairing link, then asks you to
-  confirm the verification words shown on the phone.
+- `rconnect pair`: pair a phone. While it runs, the phone lists this computer under
+  "Computers on this network"; it also shows a QR code and the pairing link. It then
+  asks you to confirm the verification words shown on the phone. `--window` shows the
+  QR code in an image viewer, which also happens when the terminal is too small.
 - `rconnect list`: list paired phones with their fingerprints.
 - `rconnect revoke <name>`: unpair a phone, ending its session if one is active.
 - `rconnect status`: show this computer's fingerprint and what is connected.
@@ -96,8 +98,9 @@ bindings and compile eSpeak NG's voice data. The first build takes a while.
 
 After installing, turn on the RConnect key capture service in Android's accessibility
 settings, so that keys the system handles itself (Alt+Tab, the Meta key) reach the
-computer too. To pair, run `rconnect pair` on the computer and scan its QR code with any
-QR code scanner app, which opens RConnect, or paste the pairing link in RConnect.
+computer too. To pair, run `rconnect pair` on the computer, then in RConnect choose
+"Pair a computer" and pick the computer from the local network list, scan the QR code
+with any QR code scanner app (which opens RConnect), or paste the pairing link.
 
 ## Development
 

@@ -2,14 +2,13 @@
 //!
 //! [`ALPN_PAIR`]: rconnect_protocol::ALPN_PAIR
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use iroh::EndpointId;
 use iroh::endpoint::Connection;
 use rconnect_protocol::messages::{PairRejectReason, PairRequest, PairResponse};
-use rconnect_protocol::ticket::{PairingSecret, PairingTicket};
+use rconnect_protocol::ticket::{PairingSecret, PairingTicket, SECRET_LEN};
 use rconnect_protocol::{PROTOCOL_VERSION, framing, words};
 use tokio::io::BufReader;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -24,9 +23,6 @@ const WINDOW_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 /// How long the phone waits for the user's decision.
 const DECISION_TIMEOUT: Duration = Duration::from_secs(3 * 60);
-
-/// Most addresses put into the QR code, to keep it small.
-const MAX_TICKET_ADDRS: usize = 4;
 
 pub struct PairingWindow {
     secret: PairingSecret,
@@ -138,21 +134,17 @@ impl Daemon {
         }
     }
 
+    /// A minimal ticket, so the QR code stays small. The phone finds this host by its id
+    /// through mDNS on the local network, or iroh's DNS address lookup elsewhere.
     async fn ticket(&self, secret: PairingSecret) -> PairingTicket {
-        // Give the endpoint a moment to reach its relay, so the ticket includes it.
+        // Give the endpoint a moment to come online, so its DNS record is published by
+        // the time the phone looks it up.
         let _ = tokio::time::timeout(Duration::from_secs(3), self.endpoint.online()).await;
-        let addr = self.endpoint.addr();
-        let direct_addrs: Vec<SocketAddr> = addr
-            .ip_addrs()
-            .filter(|addr| useful_ticket_addr(addr))
-            .copied()
-            .take(MAX_TICKET_ADDRS)
-            .collect();
         PairingTicket {
             host_id: *self.id().as_bytes(),
             secret,
-            relay_url: addr.relay_urls().next().map(|url| url.to_string()),
-            direct_addrs,
+            relay_url: None,
+            direct_addrs: Vec::new(),
         }
     }
 
@@ -193,7 +185,7 @@ impl Daemon {
         &self,
         controller: EndpointId,
         protocol_version: u16,
-        secret: Option<[u8; 16]>,
+        secret: Option<[u8; SECRET_LEN]>,
         device_name: String,
     ) -> PairResponse {
         if protocol_version != PROTOCOL_VERSION {
@@ -231,17 +223,6 @@ impl Daemon {
                 device_name: self.config.name.clone(),
             },
             _ => PairResponse::Rejected(PairRejectReason::Declined),
-        }
-    }
-}
-
-/// Keeps addresses a phone could plausibly reach: no loopback or IPv6 link-local ones.
-fn useful_ticket_addr(addr: &SocketAddr) -> bool {
-    match addr {
-        SocketAddr::V4(v4) => !v4.ip().is_loopback() && !v4.ip().is_unspecified(),
-        SocketAddr::V6(v6) => {
-            let ip = v6.ip();
-            !ip.is_loopback() && !ip.is_unspecified() && !ip.is_unicast_link_local()
         }
     }
 }
@@ -286,13 +267,5 @@ mod tests {
         assert_eq!(clean_name("evil\x1b[2Jname\n"), "evil[2Jname");
         assert_eq!(clean_name("\x07"), "Unnamed phone");
         assert_eq!(clean_name(&"x".repeat(100)).len(), 64);
-    }
-
-    #[test]
-    fn ticket_addresses() {
-        assert!(useful_ticket_addr(&"192.168.1.5:1234".parse().unwrap()));
-        assert!(useful_ticket_addr(&"[2001:db8::1]:1234".parse().unwrap()));
-        assert!(!useful_ticket_addr(&"127.0.0.1:1234".parse().unwrap()));
-        assert!(!useful_ticket_addr(&"[fe80::1]:1234".parse().unwrap()));
     }
 }

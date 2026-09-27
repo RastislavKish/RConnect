@@ -3,6 +3,8 @@
 //!
 //! ```text
 //! rconnect-dev-controller pair '<rconnect://pair?... URI>'
+//! rconnect-dev-controller discover
+//! rconnect-dev-controller pair-local <name>
 //! rconnect-dev-controller hosts
 //! rconnect-dev-controller session [host name]
 //! ```
@@ -16,7 +18,11 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use rconnect_core::speech::VoiceSettings;
-use rconnect_core::{Controller, Host, SessionInput, SessionObserver, SpeechConfig, drive_session};
+use std::time::Duration;
+
+use rconnect_core::{
+    Controller, Discovery, Host, SessionInput, SessionObserver, SpeechConfig, drive_session,
+};
 use rconnect_protocol::messages::KeyMessage;
 use rconnect_protocol::ticket::PairingTicket;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -43,6 +49,40 @@ async fn main() -> anyhow::Result<()> {
         Some("pair") => {
             let uri = args.get(1).context("usage: pair <URI>")?;
             pair(&controller, &dir, uri).await?;
+        }
+        Some("discover") => {
+            for (_, name) in discover(&controller, Duration::from_secs(5)).await {
+                println!("{name}");
+            }
+        }
+        Some("pair-local") => {
+            let name = args.get(1).context("usage: pair-local <name or hex id>")?;
+            // A hex id skips discovery, which firewalls blocking multicast can prevent.
+            let id = match rconnect_protocol::hex::decode::<32>(name) {
+                Some(id) => {
+                    println!(
+                        "{} answers as {:?}.",
+                        name,
+                        controller.query_name(&id).await?
+                    );
+                    id
+                }
+                None => {
+                    let found = discover(&controller, Duration::from_secs(5)).await;
+                    found
+                        .into_iter()
+                        .find(|(_, found)| found == name)
+                        .context("no such computer on the local network")?
+                        .0
+                }
+            };
+            println!(
+                "Verification words: {}",
+                controller.pairing_words(&id).join(", ")
+            );
+            println!("Confirm on the computer...");
+            let host = controller.pair_discovered(id).await?;
+            save_host(&dir, host)?;
         }
         Some("hosts") => {
             for host in load_hosts(&dir)? {
@@ -73,12 +113,43 @@ async fn pair(controller: &Controller, dir: &std::path::Path, uri: &str) -> anyh
     );
     println!("Confirm on the computer...");
     let host = controller.pair(&ticket).await?;
+    save_host(dir, host)
+}
+
+fn save_host(dir: &std::path::Path, host: Host) -> anyhow::Result<()> {
     println!("Paired with {}.", host.name);
     let mut hosts = load_hosts(dir)?;
     hosts.retain(|existing| existing.id != host.id);
     hosts.push(host);
     std::fs::write(dir.join("hosts.json"), serde_json::to_vec_pretty(&hosts)?)?;
     Ok(())
+}
+
+/// Computers found on the local network within `duration`.
+async fn discover(
+    controller: &Controller,
+    duration: Duration,
+) -> Vec<(rconnect_protocol::DeviceId, String)> {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let task = tokio::spawn({
+        let controller = controller.clone();
+        async move { controller.discover(tx).await }
+    });
+    let mut found = Vec::new();
+    let deadline = tokio::time::sleep(duration);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            event = rx.recv() => match event {
+                Some(Discovery::Found { id, name }) => found.push((id, name)),
+                Some(Discovery::Lost { id }) => found.retain(|(known, _)| *known != id),
+                None => break,
+            },
+            _ = &mut deadline => break,
+        }
+    }
+    task.abort();
+    found
 }
 
 async fn session(controller: &Controller, host: &Host) -> anyhow::Result<()> {

@@ -16,12 +16,12 @@ use std::time::Duration;
 use anyhow::Context;
 use iroh::endpoint::{Connection, QuicTransportConfig, RecvStream, SendStream, presets};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey, TransportAddr};
-use iroh_mdns_address_lookup::MdnsAddressLookup;
+use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 use rconnect_protocol::messages::{
     Capabilities, ControlMessage, EndReason, Handshake, KeyMessage, PairRejectReason, PairRequest,
     PairResponse, RejectReason, SpeechCommand, SpeechEvent,
 };
-use rconnect_protocol::ticket::PairingTicket;
+use rconnect_protocol::ticket::{PairingTicket, SECRET_LEN};
 use rconnect_protocol::{
     ALPN_PAIR, ALPN_SESSION, DeviceId, IDLE_TIMEOUT, KEEP_ALIVE_INTERVAL, MDNS_SERVICE_NAME,
     PROTOCOL_VERSION, framing, words,
@@ -92,8 +92,18 @@ pub enum ConnectError {
     Other(#[from] anyhow::Error),
 }
 
+/// A computer found on the local network.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Discovery {
+    Found { id: DeviceId, name: String },
+    Lost { id: DeviceId },
+}
+
+/// The controller side of RConnect. Cheap to clone; clones share the endpoint.
+#[derive(Clone)]
 pub struct Controller {
     endpoint: Endpoint,
+    mdns: MdnsAddressLookup,
     device_name: String,
 }
 
@@ -104,18 +114,21 @@ impl Controller {
             .max_idle_timeout(Some(IDLE_TIMEOUT.try_into()?))
             .keep_alive_interval(KEEP_ALIVE_INTERVAL)
             .build();
+        let secret_key = SecretKey::from_bytes(&secret_key);
+        // Built here rather than by the endpoint, so discovery can subscribe to it.
+        let mdns = MdnsAddressLookup::builder()
+            .service_name(MDNS_SERVICE_NAME)
+            .advertise(false)
+            .build(secret_key.public())?;
         let endpoint = Endpoint::builder(presets::N0)
-            .secret_key(SecretKey::from_bytes(&secret_key))
+            .secret_key(secret_key)
             .transport_config(transport)
-            .address_lookup(
-                MdnsAddressLookup::builder()
-                    .service_name(MDNS_SERVICE_NAME)
-                    .advertise(false),
-            )
+            .address_lookup(mdns.clone())
             .bind()
             .await?;
         Ok(Controller {
             endpoint,
+            mdns,
             device_name,
         })
     }
@@ -135,15 +148,35 @@ impl Controller {
 
     /// Pairs with the host from a scanned ticket. Waits until the user decides on the host.
     pub async fn pair(&self, ticket: &PairingTicket) -> Result<Host, PairError> {
-        let mut host = Host {
+        let host = Host {
             id: ticket.host_id,
             name: String::new(),
             relay_url: ticket.relay_url.clone(),
             direct_addrs: ticket.direct_addrs.clone(),
         };
+        self.pair_with(host, Some(ticket.secret.0)).await
+    }
+
+    /// Pairs with a host found on the local network. Without a ticket's secret, the
+    /// verification words are what protects this pairing, so they must be shown.
+    pub async fn pair_discovered(&self, host_id: DeviceId) -> Result<Host, PairError> {
+        let host = Host {
+            id: host_id,
+            name: String::new(),
+            relay_url: None,
+            direct_addrs: Vec::new(),
+        };
+        self.pair_with(host, None).await
+    }
+
+    async fn pair_with(
+        &self,
+        mut host: Host,
+        secret: Option<[u8; SECRET_LEN]>,
+    ) -> Result<Host, PairError> {
         let request = PairRequest::Pair {
             protocol_version: PROTOCOL_VERSION,
-            secret: Some(ticket.secret.0),
+            secret,
             device_name: self.device_name.clone(),
         };
         let connection = self.connect(&host, ALPN_PAIR).await?;
@@ -169,6 +202,75 @@ impl Controller {
                 PairRejectReason::UnsupportedVersion(_) => PairError::UnsupportedVersion,
             }),
             other => Err(anyhow::anyhow!("unexpected answer {other:?}").into()),
+        }
+    }
+
+    /// Reports computers on the local network until `found` is closed. Each one is asked
+    /// for its name.
+    pub async fn discover(&self, found: mpsc::UnboundedSender<Discovery>) {
+        use tokio_stream::StreamExt;
+
+        let mut events = self.mdns.subscribe().await;
+        let mut known = std::collections::HashSet::new();
+        loop {
+            let event = tokio::select! {
+                event = events.next() => match event {
+                    Some(event) => event,
+                    None => return,
+                },
+                _ = found.closed() => return,
+            };
+            match event {
+                DiscoveryEvent::Discovered { endpoint_info, .. } => {
+                    let id = *endpoint_info.endpoint_id.as_bytes();
+                    if !known.insert(id) {
+                        continue;
+                    }
+                    let controller = self.clone();
+                    let found = found.clone();
+                    tokio::spawn(async move {
+                        match controller.query_name(&id).await {
+                            Ok(name) => {
+                                let _ = found.send(Discovery::Found { id, name });
+                            }
+                            Err(e) => {
+                                tracing::debug!("computer on the network did not answer: {e:#}")
+                            }
+                        }
+                    });
+                }
+                DiscoveryEvent::Expired { endpoint_id } => {
+                    let id = *endpoint_id.as_bytes();
+                    if known.remove(&id) {
+                        let _ = found.send(Discovery::Lost { id });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Asks a host for its name.
+    pub async fn query_name(&self, host_id: &DeviceId) -> anyhow::Result<String> {
+        let host = Host {
+            id: *host_id,
+            name: String::new(),
+            relay_url: None,
+            direct_addrs: Vec::new(),
+        };
+        let connection = self.connect(&host, ALPN_PAIR).await?;
+        let (mut send, recv) = connection.open_bi().await?;
+        framing::write_message(&mut send, &PairRequest::Query).await?;
+        send.finish()?;
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            framing::read_message::<_, PairResponse>(&mut BufReader::new(recv)),
+        )
+        .await??;
+        connection.close(0u32.into(), b"done");
+        match response {
+            Some(PairResponse::Info { device_name, .. }) => Ok(device_name),
+            other => anyhow::bail!("unexpected answer {other:?}"),
         }
     }
 

@@ -291,7 +291,7 @@ pub enum PairRequest {
         protocol_version: u16,
         /// Secret from the pairing ticket (QR code). Absent when the host was found
         /// through local discovery.
-        secret: Option<[u8; 16]>,
+        secret: Option<[u8; crate::ticket::SECRET_LEN]>,
         device_name: String,
     },
 }

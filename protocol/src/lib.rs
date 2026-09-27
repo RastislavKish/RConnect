@@ -7,6 +7,7 @@
 //! * Every stream carries length-prefixed, `postcard`-encoded messages (see [`framing`]).
 //! * Each stream has its own message type, defined in [`messages`].
 
+pub mod base32;
 pub mod framing;
 pub mod hex;
 pub mod messages;

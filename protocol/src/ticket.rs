@@ -1,29 +1,36 @@
 //! Pairing tickets: what the host's QR code contains.
 //!
-//! Format: `rconnect://pair?id=<hex>&secret=<hex>[&relay=<url>][&addr=<ip:port>]...`
+//! Format: `rconnect://pair?id=<base32 id>&s=<base32 secret>`, about 90 characters, so the
+//! QR code fits in a standard terminal. The phone finds the host by its id, through mDNS on
+//! the local network or iroh's DNS address lookup. Optional `relay` and `addr` parameters
+//! carry address hints.
 
 use std::net::SocketAddr;
 
 use url::Url;
 
-use crate::{DeviceId, hex};
+use crate::{DeviceId, base32};
 
 const SCHEME: &str = "rconnect";
 const HOST: &str = "pair";
 
+/// Length of the pairing secret. 80 bits cannot be guessed during a pairing window,
+/// and keep the QR code small.
+pub const SECRET_LEN: usize = 10;
+
 /// One-time secret proving that the controller saw the host's QR code.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub struct PairingSecret(pub [u8; 16]);
+pub struct PairingSecret(pub [u8; SECRET_LEN]);
 
 impl PairingSecret {
     pub fn generate() -> PairingSecret {
-        let mut bytes = [0u8; 16];
+        let mut bytes = [0u8; SECRET_LEN];
         rand::fill(&mut bytes);
         PairingSecret(bytes)
     }
 
     /// Compares in constant time, so response timing does not leak the secret.
-    pub fn matches(&self, other: &[u8; 16]) -> bool {
+    pub fn matches(&self, other: &[u8; SECRET_LEN]) -> bool {
         self.0
             .iter()
             .zip(other)
@@ -42,9 +49,9 @@ impl std::fmt::Debug for PairingSecret {
 pub struct PairingTicket {
     pub host_id: DeviceId,
     pub secret: PairingSecret,
-    /// The host's home relay, so the controller can reach it without address lookup.
+    /// The host's home relay, if known.
     pub relay_url: Option<String>,
-    /// The host's direct addresses, for LAN connections.
+    /// The host's direct addresses, if known.
     pub direct_addrs: Vec<SocketAddr>,
 }
 
@@ -63,8 +70,8 @@ impl PairingTicket {
         let mut url = Url::parse(&format!("{SCHEME}://{HOST}")).expect("constant URI is valid");
         {
             let mut query = url.query_pairs_mut();
-            query.append_pair("id", &hex::encode(&self.host_id));
-            query.append_pair("secret", &hex::encode(&self.secret.0));
+            query.append_pair("id", &base32::encode(&self.host_id));
+            query.append_pair("s", &base32::encode(&self.secret.0));
             if let Some(relay) = &self.relay_url {
                 query.append_pair("relay", relay);
             }
@@ -77,7 +84,11 @@ impl PairingTicket {
 
     pub fn from_uri(uri: &str) -> Result<PairingTicket, TicketError> {
         let url = Url::parse(uri.trim()).map_err(|_| TicketError::InvalidUri)?;
-        if url.scheme() != SCHEME || url.host_str() != Some(HOST) {
+        if !url.scheme().eq_ignore_ascii_case(SCHEME)
+            || !url
+                .host_str()
+                .is_some_and(|host| host.eq_ignore_ascii_case(HOST))
+        {
             return Err(TicketError::WrongScheme);
         }
 
@@ -86,13 +97,14 @@ impl PairingTicket {
         let mut relay_url = None;
         let mut direct_addrs = Vec::new();
         for (key, value) in url.query_pairs() {
-            match &*key {
+            match key.to_ascii_lowercase().as_str() {
                 "id" => {
-                    host_id = Some(hex::decode(&value).ok_or(TicketError::InvalidParameter("id"))?)
+                    host_id =
+                        Some(base32::decode(&value).ok_or(TicketError::InvalidParameter("id"))?)
                 }
-                "secret" => {
+                "s" => {
                     secret = Some(PairingSecret(
-                        hex::decode(&value).ok_or(TicketError::InvalidParameter("secret"))?,
+                        base32::decode(&value).ok_or(TicketError::InvalidParameter("s"))?,
                     ))
                 }
                 "relay" => relay_url = Some(value.into_owned()),
@@ -108,7 +120,7 @@ impl PairingTicket {
 
         Ok(PairingTicket {
             host_id: host_id.ok_or(TicketError::InvalidParameter("id"))?,
-            secret: secret.ok_or(TicketError::InvalidParameter("secret"))?,
+            secret: secret.ok_or(TicketError::InvalidParameter("s"))?,
             relay_url,
             direct_addrs,
         })
@@ -119,34 +131,40 @@ impl PairingTicket {
 mod tests {
     use super::*;
 
-    fn ticket() -> PairingTicket {
+    fn minimal() -> PairingTicket {
         PairingTicket {
             host_id: [0xab; 32],
-            secret: PairingSecret([0x01; 16]),
+            secret: PairingSecret([0x01; SECRET_LEN]),
+            relay_url: None,
+            direct_addrs: vec![],
+        }
+    }
+
+    #[test]
+    fn minimal_ticket_is_short() {
+        let uri = minimal().to_uri();
+        assert!(uri.starts_with("rconnect://pair?id="));
+        assert!(uri.len() <= 90, "{} characters: {uri}", uri.len());
+        assert_eq!(PairingTicket::from_uri(&uri).unwrap(), minimal());
+    }
+
+    #[test]
+    fn hints_roundtrip() {
+        let ticket = PairingTicket {
             relay_url: Some("https://relay.example.org./".into()),
             direct_addrs: vec![
                 "192.168.1.20:4433".parse().unwrap(),
                 "[fe80::1]:4433".parse().unwrap(),
             ],
-        }
-    }
-
-    #[test]
-    fn roundtrip() {
-        let ticket = ticket();
-        let uri = ticket.to_uri();
-        assert!(uri.starts_with("rconnect://pair?id=abab"));
-        assert_eq!(PairingTicket::from_uri(&uri).unwrap(), ticket);
-    }
-
-    #[test]
-    fn minimal_ticket() {
-        let ticket = PairingTicket {
-            relay_url: None,
-            direct_addrs: vec![],
-            ..ticket()
+            ..minimal()
         };
         assert_eq!(PairingTicket::from_uri(&ticket.to_uri()).unwrap(), ticket);
+    }
+
+    #[test]
+    fn scanners_changing_case_are_fine() {
+        let uri = minimal().to_uri().to_uppercase();
+        assert_eq!(PairingTicket::from_uri(&uri).unwrap(), minimal());
     }
 
     #[test]
@@ -160,13 +178,13 @@ mod tests {
             Err(TicketError::InvalidUri)
         );
         assert_eq!(
-            PairingTicket::from_uri("rconnect://pair?id=00&secret=00"),
+            PairingTicket::from_uri("rconnect://pair?id=00&s=00"),
             Err(TicketError::InvalidParameter("id"))
         );
-        let uri = ticket().to_uri().replace("secret=", "x=");
+        let uri = minimal().to_uri().replace("&s=", "&x=");
         assert_eq!(
             PairingTicket::from_uri(&uri),
-            Err(TicketError::InvalidParameter("secret"))
+            Err(TicketError::InvalidParameter("s"))
         );
     }
 
@@ -175,7 +193,7 @@ mod tests {
         let secret = PairingSecret::generate();
         assert!(secret.matches(&secret.0));
         let mut other = secret.0;
-        other[15] ^= 1;
+        other[SECRET_LEN - 1] ^= 1;
         assert!(!secret.matches(&other));
     }
 }
