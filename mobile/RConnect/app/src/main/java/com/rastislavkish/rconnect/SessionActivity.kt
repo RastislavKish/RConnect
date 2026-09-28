@@ -1,5 +1,8 @@
 package com.rastislavkish.rconnect
 
+import android.content.Context
+import android.net.wifi.WifiManager
+import android.os.Build
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.WindowManager
@@ -44,6 +47,7 @@ class SessionActivity : ComponentActivity() {
     private var lastSpeech by mutableStateOf("")
     private var session: SessionHandle? = null
     private var ended = false
+    private var wifiLock: WifiManager.WifiLock? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -51,6 +55,7 @@ class SessionActivity : ComponentActivity() {
         val hostId = intent.getStringExtra(EXTRA_HOST_ID) ?: return finish()
         val hostName = intent.getStringExtra(EXTRA_HOST_NAME).orEmpty()
         status = getString(R.string.connecting_to, hostName)
+        acquireWifiLock()
 
         setContent {
             RConnectTheme {
@@ -143,6 +148,31 @@ class SessionActivity : ComponentActivity() {
     override fun onStop() {
         super.onStop()
         if (!isChangingConfigurations) end()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        wifiLock?.release()
+        wifiLock = null
+    }
+
+    /**
+     * Keeps Wi-Fi out of power saving during the session. Otherwise the phone's radio
+     * sleeps between the router's beacons, and speech from the computer waits at the
+     * router for up to about 100 ms.
+     */
+    @Suppress("DEPRECATION")
+    private fun acquireWifiLock() {
+        val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+        } else {
+            WifiManager.WIFI_MODE_FULL_HIGH_PERF
+        }
+        wifiLock = wifi.createWifiLock(mode, "RConnect session").apply {
+            setReferenceCounted(false)
+            acquire()
+        }
     }
 
     private fun end() {
