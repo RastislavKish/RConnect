@@ -426,13 +426,14 @@ Hello   { protocol_version: u16, app_version: String, device_name: String, capab
 Welcome { protocol_version: u16, app_version: String, device_name: String, capabilities: u32 }
 Reject  { reason: RejectReason }        // Unsupported version, NotPaired, …
 EndSession { reason: EndReason }        // user shortcut, desktop shutdown, replaced, …
-AudioRequest { direction: AudioDir }    // desktop→phone, phone→desktop, duplex
-AudioStarted { direction: AudioDir, codec: Codec, sample_rate: u32, frame_ms: u8 }
-AudioStop
+AudioRequest { direction: AudioDir, mode: AudioMode }   // AudioMode = Auto | Always; also switches modes
+AudioStarted { direction: AudioDir, codec: Codec, sample_rate: u32, channels: u8, frame_ms: u8 }
+AudioStop                               // back to Off
 Ping(u32)                               // phone measures the round trip time
 Pong(u32)                               // desktop's answer, same number
 ```
-The capabilities bitset contains `BRAILLE`, `AUDIO_OUT`, `AUDIO_IN`, and future bits.
+The capabilities bitset contains `BRAILLE`, `AUDIO_TO_CONTROLLER`, `AUDIO_TO_HOST`, and
+future bits.
 
 **Keys** (phone → desktop)
 ```
@@ -480,16 +481,137 @@ or the platform braille APIs).
 
 ### 5.6 Optional audio stream
 
-This is for audio CAPTCHAs, videos and similar.
+This is for audio CAPTCHAs, videos, and sounds that do not go through speech-dispatcher,
+such as Orca's progress beeps. It goes from the desktop to the phone. The other
+direction (microphone → Opus → a PipeWire virtual source) comes later.
 
-- Desktop → phone: capture the default sink's monitor through PipeWire, Opus at
-  10–20 ms frames, one frame per datagram (`seq: u16`, `timestamp: u32`, payload). The
-  phone runs a small jitter buffer with Opus packet loss concealment, and the result is
-  mixed into the same output stream as speech.
-- While audio is streaming, `sd_rconnect` must not mirror speech locally. Otherwise the
-  captured audio would repeat speech the phone has already spoken.
-- Phone → desktop (duplex, later): microphone → Opus → a PipeWire virtual source.
-- Late datagrams are dropped, never retransmitted.
+#### Modes
+
+The user picks the mode on the phone: in the settings, and during a session with a
+shortcut that the phone intercepts and confirms by speech (like CapsLock+F11).
+
+- **Off** (default): no PipeWire connection, no capture thread, no datagrams. The phone's
+  audio callback only checks that there is no host audio. Keys and speech work exactly as
+  without the feature.
+- **Auto:** the host captures, but sends only while something audible plays. In Remote
+  mode the laptop is silent while the screen reader speaks, so nothing is sent then.
+- **Always:** a continuous stream, silence included. It avoids the gate's edge cases (clipped
+  onsets, the jitter buffer refilling at every burst) at the cost of phone battery and
+  some bandwidth. With VBR, silent Opus frames are only a few bytes.
+
+`AudioRequest` starts the stream or switches its mode, and `AudioStop` returns to Off. The
+host starts the capture on the request and tears it down on stop, so Off costs nothing
+even in the middle of a session.
+
+#### Capture: tapping application streams
+
+The daemon connects to PipeWire as a client and creates a capture node with
+`node.passive = true`, so it never keeps a sink running. It watches the registry and links
+the output ports of every application playback stream to this node, **in addition to** the
+stream's existing link to its sink. A port can feed several inputs, so nothing is
+rerouted. Vencord's venmic captures per-application audio for Discord the same way.
+
+- The user's setup is not changed: sinks, the default sink, profiles and volumes stay as
+  they are. When the user moves a stream to another sink, the tap stays, because it hangs
+  on the stream's ports.
+- The links are not lingering (`object.linger` unset), so they belong to the daemon's
+  connection. They disappear when the stream ends, the audio stops, or the daemon exits or
+  crashes. Nothing is written to WirePlumber's state or the user's configuration.
+- **speech-dispatcher's stream is not tapped.** This is what makes streaming compatible
+  with Mirror mode: local speech keeps playing on the laptop and is not captured and
+  repeated on the phone. It also keeps local speech from opening the Auto gate.
+- **Loopback and filter streams are not tapped** (EasyEffects, `module-loopback`, filter
+  chains). They carry audio that the applications behind them already produced, so
+  tapping them would duplicate it. They are recognised by node properties such as
+  `node.link-group`, `node.virtual` and `stream.monitor` **(verify)** the exact set.
+- The tapped audio comes before the sink's volume, so the laptop can be muted or turned
+  down while the phone still hears everything. Each stream's own volume still applies
+  **(verify)** where PipeWire applies stream volume.
+- Streams with other channel layouts are mixed to the capture format, 48 kHz stereo.
+- The node asks for a latency of about 10 ms (`node.latency`). The quantum is shared by
+  the whole graph, so asking for less makes all of the host's audio wake up more often.
+- Applications that open ALSA hardware directly bypass PipeWire and are not captured.
+- **(verify)** WirePlumber 0.5 leaves links made by other clients alone.
+
+**Fallback**, when streams cannot be tapped (PulseAudio without PipeWire, or the user
+turns tapping off): capture the default sink's monitor. The monitor contains local speech,
+so while audio streams, `sd_rconnect` is switched from Mirror to Remote. The monitor also
+keeps the sink from suspending, and **(verify)** follows the sink's volume and mute.
+
+#### The Auto gate
+
+A voice activity detector (such as the Earshot crate) is the wrong tool here. It tells
+speech from everything else, so it would drop beeps, notifications, music and the
+non-speech parts of an audio CAPTCHA. The gate only asks whether anything audible plays:
+
+1. While no tapped stream is running, the passive node gets no data, and there is nothing
+   to analyse.
+2. Otherwise, each frame's peak is compared with a threshold of about -60 dBFS, because
+   browsers and games often keep streams open that play silence. The gate opens on the
+   first frame above it, and closes after 300–500 ms below it, so quiet passages and
+   fading sounds don't make it flap.
+
+- **Pre-roll:** the last one or two frames are kept and sent first when the gate opens,
+  so onsets are not clipped. The gate decides per frame without lookahead, so it adds no
+  latency. The Opus encoder is reset when the gate opens.
+- **End of burst:** the last datagram of a burst carries an end flag, so the phone fades
+  out instead of running packet loss concealment into a gap it would take for loss. A
+  lost end flag is caught by a timeout.
+- Opus DTX was considered. It is designed for voice and still sends a packet every few
+  hundred milliseconds of silence; the gate is simpler and does exactly this.
+
+#### Wire format
+
+- Opus, 48 kHz stereo, restricted low-delay mode (about 5 ms algorithmic delay), VBR at
+  about 24–64 kbps, 20 ms frames (10 ms is possible at twice the packet rate).
+- One frame per datagram: `seq: u16`, `timestamp: u32`, flags (end of burst), payload.
+  Late datagrams are dropped, never retransmitted.
+- Datagrams share the connection's congestion control with keys and speech. The
+  datagram send buffer is kept small, so when the congestion window is full, stale audio
+  is dropped instead of queued ahead of speech. On a relayed connection the host lowers
+  the bitrate; **(verify)** the relays' rate limits.
+
+#### Playback on the phone
+
+- A jitter buffer with Opus packet loss concealment, adaptive between about 20 and 60 ms.
+  In Auto it refills at the start of every burst.
+- **Clock drift:** the laptop's sound card and the phone's DAC differ by up to about
+  100 ppm, so an hour of continuous audio drifts by about 360 ms. The jitter buffer keeps
+  its level with slight adaptive resampling. Gaps in Auto reset the drift, but long
+  bursts (a whole video) need the correction as well.
+- **Mixing happens in the audio callback**, from a separate buffer. Host audio is never
+  appended to `Playback`, whose marks and ends are tied to speech sample positions. So
+  speech latency does not change, and `Stop` clears only speech. Host audio can be ducked
+  while speech plays, and has its own volume setting, because the output stream follows
+  the accessibility volume.
+- The output stream is currently opened at eSpeak NG's 22.05 kHz in mono, which is too
+  poor for music and video. It moves to the device's native rate in stereo, and speech is
+  upsampled with the existing resampler. Android recommends not requesting a sample rate
+  at all for the low-latency path, so this may help speech latency too **(verify)**.
+- libopus is vendored as a submodule and built with CMake, like eSpeak NG, for F-Droid.
+  The desktop links the system's libopus and libpipewire.
+
+#### Latency
+
+Host audio, end to end (estimates):
+
+| Stage | Typical |
+|---|---|
+| PipeWire quantum | 5–21 ms (1024 samples at 48 kHz by default) |
+| Opus frame + algorithmic delay | 10–20 ms + about 5 ms |
+| Network (LAN) | 2–5 ms |
+| Jitter buffer | 20–60 ms |
+| AAudio output | 5–20 ms |
+| Bluetooth headphones | +100–200 ms |
+
+About 50–120 ms without Bluetooth: fine for videos and CAPTCHAs. Speech is synthesized on
+the phone and so arrives 50–100 ms earlier than host audio, so an Orca beep may be heard
+slightly out of order with the speech around it.
+
+The stream barely affects keys and speech: keys travel the other way, and the stream is
+small on a LAN. One side effect: a continuous stream keeps both Wi-Fi radios awake. Always
+therefore hides the power-saving delay described in the README, while in Auto key latency
+changes depending on whether audio happens to play, which makes Ping results confusing.
 
 ## 6. Code layout
 
@@ -537,3 +659,6 @@ Low-priority experiments for later:
       `QuicTransportConfig` (`max_idle_timeout`, `keep_alive_interval`). Both sides use a
       3 s timeout and a 1 s keep-alive. In testing, a key held when the phone vanished
       was released 3.1 s later.
+- [ ] Audio stream (§5.6): which node properties mark loopback and filter streams,
+      whether WirePlumber 0.5 leaves the tap links alone, where stream and sink volume
+      are applied relative to the tap, and the relays' rate limits.
