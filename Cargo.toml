@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["protocol", "desktop/rconnect", "mobile/core", "mobile/ffi"]
+members = ["protocol", "opus", "desktop/rconnect", "mobile/core", "mobile/ffi"]
 
 [profile.release]
 strip = true

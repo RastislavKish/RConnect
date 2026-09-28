@@ -32,6 +32,7 @@ import com.rastislavkish.rconnect.ui.theme.RConnectTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import uniffi.rconnect_ffi.AudioStreamMode
 import uniffi.rconnect_ffi.ConnectionPath
 import uniffi.rconnect_ffi.RConnectException
 import uniffi.rconnect_ffi.SessionHandle
@@ -40,8 +41,9 @@ import uniffi.rconnect_ffi.SessionListener
 /**
  * A running session: keys go to the computer, its screen reader speaks through the
  * phone. It ends with CapsLock+F11, the End button, or by leaving this screen.
+ * CapsLock+F10 switches the computer's audio stream between off, auto and always.
  */
-class SessionActivity : ComponentActivity() {
+class SessionActivity : ComponentActivity(), KeyRouter.Shortcuts {
 
     private var status by mutableStateOf("")
     /** Last text spoken by the computer, shown for sighted helpers; never announced. */
@@ -49,6 +51,8 @@ class SessionActivity : ComponentActivity() {
     private var session: SessionHandle? = null
     private var ended = false
     private var wifiLock: WifiManager.WifiLock? = null
+    /** The audio mode last asked for; the computer confirms it through `onAudio`. */
+    private var audioMode = AudioStreamMode.OFF
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -93,11 +97,14 @@ class SessionActivity : ComponentActivity() {
                 val core = app.core.await()
                 val speechData = app.speechData.await()
                 val voice = withContext(Dispatchers.IO) { app.settings.voiceSettings(speechData) }
+                val audio = app.settings.audioSettings()
+                audioMode = audio.mode
                 val handle = core.startSession(
                     hostId,
                     speechData.path,
                     voice,
                     app.settings.keepAlive,
+                    audio,
                     Listener(),
                 )
                 if (ended) {
@@ -105,7 +112,7 @@ class SessionActivity : ComponentActivity() {
                     return@launch
                 }
                 session = handle
-                KeyRouter.attach(handle) { end() }
+                KeyRouter.attach(handle, this@SessionActivity)
                 status = getString(R.string.connected_to, hostName)
             } catch (e: RConnectException) {
                 status = e.message ?: getString(R.string.connection_failed)
@@ -133,6 +140,18 @@ class SessionActivity : ComponentActivity() {
                 getString(R.string.ping_result, milliseconds.roundToInt(), pathName)
             }
             runOnUiThread { Toast.makeText(this@SessionActivity, message, Toast.LENGTH_SHORT).show() }
+        }
+
+        override fun onAudio(mode: AudioStreamMode, available: Boolean) {
+            val message = if (available) {
+                getString(R.string.audio_mode_now, getString(audioModeName(mode)))
+            } else {
+                getString(R.string.audio_unavailable)
+            }
+            runOnUiThread {
+                audioMode = mode
+                window.decorView.announceForAccessibility(message)
+            }
         }
 
         override fun onEnded(reason: String) {
@@ -181,6 +200,18 @@ class SessionActivity : ComponentActivity() {
             setReferenceCounted(false)
             acquire()
         }
+    }
+
+    override fun endSession() = end()
+
+    override fun cycleAudioMode() {
+        val next = when (audioMode) {
+            AudioStreamMode.OFF -> AudioStreamMode.AUTO
+            AudioStreamMode.AUTO -> AudioStreamMode.ALWAYS
+            AudioStreamMode.ALWAYS -> AudioStreamMode.OFF
+        }
+        audioMode = next
+        session?.setAudioMode(next)
     }
 
     private fun end() {

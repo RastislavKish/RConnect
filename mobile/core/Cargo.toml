@@ -8,6 +8,7 @@ description = "Controller side of RConnect: the Rust core of the Android app"
 anyhow = "1.0.104"
 iroh = "1.2.0"
 iroh-mdns-address-lookup = "0.5.0"
+rconnect-opus = { version = "0.1.0", path = "../../opus" }
 rconnect-protocol = { version = "0.1.0", path = "../../protocol" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

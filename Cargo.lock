@@ -3093,6 +3093,7 @@ dependencies = [
  "iroh",
  "iroh-mdns-address-lookup",
  "ndk",
+ "rconnect-opus",
  "rconnect-protocol",
  "serde",
  "serde_json",
@@ -3118,6 +3119,14 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uniffi",
+]
+
+[[package]]
+name = "rconnect-opus"
+version = "0.1.0"
+dependencies = [
+ "cmake",
+ "pkg-config",
 ]
 
 [[package]]

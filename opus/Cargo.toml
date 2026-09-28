@@ -1,0 +1,9 @@
+[package]
+name = "rconnect-opus"
+version = "0.1.0"
+edition = "2024"
+description = "Minimal Opus encoder and decoder bindings for RConnect's audio stream"
+
+[build-dependencies]
+cmake = "0.1.58"
+pkg-config = "0.3"

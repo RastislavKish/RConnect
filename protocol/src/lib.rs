@@ -7,6 +7,7 @@
 //! * Every stream carries length-prefixed, `postcard`-encoded messages (see [`framing`]).
 //! * Each stream has its own message type, defined in [`messages`].
 
+pub mod audio;
 pub mod base32;
 pub mod framing;
 pub mod hex;
@@ -15,7 +16,7 @@ pub mod ticket;
 pub mod words;
 
 /// Version of the session and pairing protocols. Bumped on incompatible changes.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// ALPN of the pairing protocol. Accepted from anyone, but only while the host has a
 /// pairing window open.

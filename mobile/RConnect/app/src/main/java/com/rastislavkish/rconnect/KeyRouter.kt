@@ -9,24 +9,32 @@ import uniffi.rconnect_ffi.SessionHandle
  * Called on the main thread only.
  */
 object KeyRouter {
+    /** What the session shortcuts do. They are CapsLock plus a function key. */
+    interface Shortcuts {
+        /** CapsLock+F11. */
+        fun endSession()
+        /** CapsLock+F10. */
+        fun cycleAudioMode()
+    }
+
     private var session: SessionHandle? = null
-    private var onEndShortcut: (() -> Unit)? = null
+    private var shortcuts: Shortcuts? = null
     /** Keys whose press was sent, so each release matches a press. */
     private val pressed = mutableSetOf<Int>()
 
     val active: Boolean
         get() = session != null
 
-    fun attach(session: SessionHandle, onEndShortcut: () -> Unit) {
+    fun attach(session: SessionHandle, shortcuts: Shortcuts) {
         this.session = session
-        this.onEndShortcut = onEndShortcut
+        this.shortcuts = shortcuts
         pressed.clear()
     }
 
     fun detach(session: SessionHandle) {
         if (this.session === session) {
             this.session = null
-            onEndShortcut = null
+            shortcuts = null
             pressed.clear()
         }
     }
@@ -39,10 +47,16 @@ object KeyRouter {
             KeyEvent.ACTION_DOWN -> {
                 // The computer repeats held keys itself.
                 if (event.repeatCount > 0) return true
+                // The CapsLock press has already reached the computer; the second key is
+                // swallowed, and its release is not sent either.
                 if (code == KeyCodes.KEY_F11 && KeyCodes.KEY_CAPSLOCK in pressed) {
                     session.releaseAll()
                     pressed.clear()
-                    onEndShortcut?.invoke()
+                    shortcuts?.endSession()
+                    return true
+                }
+                if (code == KeyCodes.KEY_F10 && KeyCodes.KEY_CAPSLOCK in pressed) {
+                    shortcuts?.cycleAudioMode()
                     return true
                 }
                 pressed += code

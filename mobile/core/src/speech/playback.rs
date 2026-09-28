@@ -45,6 +45,11 @@ impl Playback {
         self.played + self.samples.len() as u64
     }
 
+    /// Whether speech is waiting to be played.
+    pub fn is_speaking(&self) -> bool {
+        !self.samples.is_empty()
+    }
+
     pub fn push_samples(&mut self, samples: &[i16]) {
         self.samples.extend(samples);
     }

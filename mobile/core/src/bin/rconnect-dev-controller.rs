@@ -12,7 +12,9 @@
 //! State lives in `$RCONNECT_CONTROLLER_DIR` (default
 //! `~/.local/share/rconnect-dev-controller`). In a session, type commands on stdin:
 //! `k 30` taps a key (evdev code), `k 29 46` presses a chord, `d 30` / `u 30` press and
-//! release, `t text` types lowercase letters, digits and spaces, `end` ends the session.
+//! release, `t text` types lowercase letters, digits and spaces, `ping` measures the
+//! round trip time, `audio off|auto|always` switches the computer's audio stream, `end`
+//! ends the session.
 
 use std::path::PathBuf;
 
@@ -21,10 +23,10 @@ use rconnect_core::speech::VoiceSettings;
 use std::time::Duration;
 
 use rconnect_core::{
-    ConnectionPath, Controller, Discovery, Host, SessionInput, SessionObserver, SpeechConfig,
-    drive_session,
+    AudioState, ConnectionPath, Controller, Discovery, Host, SessionInput, SessionObserver,
+    SpeechConfig, drive_session,
 };
-use rconnect_protocol::messages::KeyMessage;
+use rconnect_protocol::messages::{AudioMode, KeyMessage};
 use rconnect_protocol::ticket::PairingTicket;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
@@ -178,8 +180,14 @@ async fn session(controller: &Controller, host: &Host) -> anyhow::Result<()> {
                 Some(Command::Ping) => {
                     let _ = input_tx.send(SessionInput::Ping);
                 }
+                Some(Command::Audio(mode)) => {
+                    let _ = input_tx.send(SessionInput::Audio(mode));
+                }
                 Some(Command::End) => break,
-                None => println!("? commands: k <codes>, d <code>, u <code>, t <text>, ping, end"),
+                None => println!(
+                    "? commands: k <codes>, d <code>, u <code>, t <text>, ping, \
+                     audio off|auto|always, end"
+                ),
             }
         }
         let _ = input_tx.send(SessionInput::End);
@@ -189,6 +197,9 @@ async fn session(controller: &Controller, host: &Host) -> anyhow::Result<()> {
         data_dir,
         voice: VoiceSettings::default(),
         keep_alive: false,
+        audio_mode: None,
+        audio_volume: 100,
+        audio_ducking: true,
     };
     let end = drive_session(session, inputs, speech, &Printer).await;
     println!("Session ended: {end:?}");
@@ -208,11 +219,16 @@ impl SessionObserver for Printer {
             None => println!("Ping: no answer, {path:?}"),
         }
     }
+
+    fn audio(&self, state: AudioState) {
+        println!("Audio: {state:?}");
+    }
 }
 
 enum Command {
     Keys(Vec<KeyMessage>),
     Ping,
+    Audio(Option<AudioMode>),
     End,
 }
 
@@ -223,6 +239,12 @@ fn parse_command(line: &str) -> Option<Command> {
     Some(match command {
         "end" => Command::End,
         "ping" => Command::Ping,
+        "audio" => Command::Audio(match rest.trim() {
+            "off" => None,
+            "auto" => Some(AudioMode::Auto),
+            "always" => Some(AudioMode::Always),
+            _ => return None,
+        }),
         "d" => Command::Keys(codes()?.into_iter().map(KeyMessage::Down).collect()),
         "u" => Command::Keys(codes()?.into_iter().map(KeyMessage::Up).collect()),
         "k" => {

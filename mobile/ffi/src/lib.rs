@@ -6,12 +6,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use rconnect_core::speech::{self, SpeechEngine};
+use rconnect_core::speech::{self, HostAudio, SpeechEngine};
 use rconnect_core::{
-    ConnectError, ConnectionPath as CorePath, Controller, Discovery, Host, PairError, SessionEnd,
-    SessionInput, SessionObserver, SpeechConfig, drive_session,
+    AudioState, ConnectError, ConnectionPath as CorePath, Controller, Discovery, Host, PairError,
+    SessionEnd, SessionInput, SessionObserver, SpeechConfig, drive_session,
 };
-use rconnect_protocol::messages::{EndReason, KeyMessage, SpeechKind, Utterance};
+use rconnect_protocol::messages::{AudioMode, EndReason, KeyMessage, SpeechKind, Utterance};
 use rconnect_protocol::ticket::PairingTicket;
 use rconnect_protocol::{DeviceId, hex, words};
 use tokio::sync::mpsc;
@@ -93,8 +93,41 @@ pub trait SessionListener: Send + Sync {
     /// Result of `SessionHandle::ping`: the round trip time in milliseconds, or none when
     /// the computer did not answer in time, and the path the connection uses.
     fn on_ping(&self, milliseconds: Option<f64>, path: ConnectionPath);
+    /// The computer's audio stream changed. `available` is false when the computer
+    /// cannot stream audio; `mode` is then `Off`.
+    fn on_audio(&self, mode: AudioStreamMode, available: bool);
     /// The session ended; `reason` is a sentence to announce.
     fn on_ended(&self, reason: String);
+}
+
+/// When the computer streams its audio to the phone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum AudioStreamMode {
+    Off,
+    /// Only while something audible plays.
+    Auto,
+    /// All the time, silence included.
+    Always,
+}
+
+impl AudioStreamMode {
+    fn to_core(self) -> Option<AudioMode> {
+        match self {
+            AudioStreamMode::Off => None,
+            AudioStreamMode::Auto => Some(AudioMode::Auto),
+            AudioStreamMode::Always => Some(AudioMode::Always),
+        }
+    }
+}
+
+/// How the computer's audio plays on the phone.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct AudioSettings {
+    pub mode: AudioStreamMode,
+    /// 0..=100.
+    pub volume: u8,
+    /// Turn the computer's audio down while speech plays.
+    pub ducking: bool,
 }
 
 /// The network path a session's data takes.
@@ -239,6 +272,7 @@ impl RConnect {
         speech_data_dir: String,
         voice: VoiceSettings,
         keep_alive: bool,
+        audio: AudioSettings,
         listener: Arc<dyn SessionListener>,
     ) -> Result<Arc<SessionHandle>, RConnectError> {
         let host = self
@@ -256,6 +290,9 @@ impl RConnect {
             data_dir: PathBuf::from(speech_data_dir),
             voice: voice.into(),
             keep_alive,
+            audio_mode: audio.mode.to_core(),
+            audio_volume: audio.volume,
+            audio_ducking: audio.ducking,
         };
         tokio::spawn(async move {
             let observer = Observer(listener.clone());
@@ -342,6 +379,11 @@ impl SessionHandle {
     /// Measures the round trip time to the computer; the listener's `on_ping` follows.
     pub fn ping(&self) {
         let _ = self.inputs.send(SessionInput::Ping);
+    }
+
+    /// Switches the computer's audio stream; the listener's `on_audio` follows.
+    pub fn set_audio_mode(&self, mode: AudioStreamMode) {
+        let _ = self.inputs.send(SessionInput::Audio(mode.to_core()));
     }
 
     /// Ends the session; the listener's `on_ended` follows.
@@ -443,8 +485,12 @@ pub struct SpeechPreview {
 impl SpeechPreview {
     #[uniffi::constructor]
     pub fn new(speech_data_dir: String, voice: VoiceSettings) -> Result<Arc<Self>, RConnectError> {
-        let (engine, _events) =
-            SpeechEngine::start(PathBuf::from(speech_data_dir), voice.into(), false)?;
+        let (engine, _events) = SpeechEngine::start(
+            PathBuf::from(speech_data_dir),
+            voice.into(),
+            false,
+            Arc::new(HostAudio::new(0, false)),
+        )?;
         Ok(Arc::new(SpeechPreview {
             engine: Mutex::new(Some(engine)),
             next_id: std::sync::atomic::AtomicU32::new(1),
@@ -492,6 +538,16 @@ impl SessionObserver for Observer {
             round_trip.map(|duration| duration.as_secs_f64() * 1000.0),
             path.into(),
         );
+    }
+
+    fn audio(&self, state: AudioState) {
+        let (mode, available) = match state {
+            AudioState::Off => (AudioStreamMode::Off, true),
+            AudioState::Streaming(AudioMode::Auto) => (AudioStreamMode::Auto, true),
+            AudioState::Streaming(AudioMode::Always) => (AudioStreamMode::Always, true),
+            AudioState::Unavailable => (AudioStreamMode::Off, false),
+        };
+        self.0.on_audio(mode, available);
     }
 }
 

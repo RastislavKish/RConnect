@@ -4,3 +4,6 @@
 [submodule "mobile/third_party/sonic"]
 	path = mobile/third_party/sonic
 	url = https://github.com/waywardgeek/sonic.git
+[submodule "mobile/third_party/opus"]
+	path = mobile/third_party/opus
+	url = https://github.com/xiph/opus.git

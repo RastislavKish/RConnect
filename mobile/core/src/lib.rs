@@ -7,7 +7,7 @@
 mod driver;
 pub mod speech;
 
-pub use driver::{SessionInput, SessionObserver, SpeechConfig, drive_session};
+pub use driver::{AudioState, SessionInput, SessionObserver, SpeechConfig, drive_session};
 
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -18,8 +18,9 @@ use iroh::endpoint::{Connection, QuicTransportConfig, RecvStream, SendStream, pr
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey, TransportAddr};
 use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 use rconnect_protocol::messages::{
-    Capabilities, ControlMessage, EndReason, Handshake, KeyMessage, PairRejectReason, PairRequest,
-    PairResponse, RejectReason, SpeechCommand, SpeechEvent,
+    AudioDirection, AudioFormat, AudioMode, AudioRequest, Capabilities, ControlMessage, EndReason,
+    Handshake, KeyMessage, PairRejectReason, PairRequest, PairResponse, RejectReason,
+    SpeechCommand, SpeechEvent,
 };
 use rconnect_protocol::ticket::{PairingTicket, SECRET_LEN};
 use rconnect_protocol::{
@@ -284,7 +285,7 @@ impl Controller {
             protocol_version: PROTOCOL_VERSION,
             app_version: env!("CARGO_PKG_VERSION").into(),
             device_name: self.device_name.clone(),
-            capabilities: Capabilities::NONE,
+            capabilities: Capabilities::AUDIO_TO_CONTROLLER,
         });
         framing::write_message(&mut control_send, &hello)
             .await
@@ -327,6 +328,7 @@ impl Controller {
 
         Ok(Session {
             host_name: welcome.device_name,
+            host_capabilities: welcome.capabilities,
             connection,
             control: control_send,
             keys,
@@ -365,6 +367,10 @@ pub enum SessionOutput {
     Speech(SpeechCommand),
     /// The host's answer to [`Session::send_ping`].
     Pong(u32),
+    /// The host streams audio as datagrams (see [`Session::connection`]).
+    AudioStarted(AudioFormat),
+    /// The host stopped streaming audio, or cannot stream it.
+    AudioStopped,
     /// The session is over; nothing follows.
     Ended(SessionEnd),
 }
@@ -382,6 +388,7 @@ pub enum ConnectionPath {
 
 pub struct Session {
     pub host_name: String,
+    pub host_capabilities: Capabilities,
     connection: Connection,
     control: SendStream,
     keys: SendStream,
@@ -409,6 +416,24 @@ impl Session {
     pub async fn send_ping(&mut self, number: u32) -> anyhow::Result<()> {
         framing::write_message(&mut self.control, &ControlMessage::Ping(number)).await?;
         Ok(())
+    }
+
+    /// Asks the host to stream its audio in `mode`, or to stop with `None`.
+    pub async fn request_audio(&mut self, mode: Option<AudioMode>) -> anyhow::Result<()> {
+        let message = match mode {
+            Some(mode) => ControlMessage::AudioRequest(AudioRequest {
+                direction: AudioDirection::ToController,
+                mode,
+            }),
+            None => ControlMessage::AudioStop,
+        };
+        framing::write_message(&mut self.control, &message).await?;
+        Ok(())
+    }
+
+    /// The connection, e.g. to read audio datagrams from another task.
+    pub fn connection(&self) -> Connection {
+        self.connection.clone()
     }
 
     pub async fn send_speech_event(&mut self, event: SpeechEvent) -> anyhow::Result<()> {
@@ -452,8 +477,17 @@ async fn read_control(mut stream: BufReader<RecvStream>, tx: mpsc::UnboundedSend
     let end = loop {
         match framing::read_message::<_, ControlMessage>(&mut stream).await {
             Ok(Some(ControlMessage::EndSession(reason))) => break SessionEnd::ByHost(reason),
-            Ok(Some(ControlMessage::Pong(number))) => {
-                if tx.send(SessionOutput::Pong(number)).is_err() {
+            Ok(Some(
+                message @ (ControlMessage::Pong(_)
+                | ControlMessage::AudioStarted(_)
+                | ControlMessage::AudioStop),
+            )) => {
+                let output = match message {
+                    ControlMessage::Pong(number) => SessionOutput::Pong(number),
+                    ControlMessage::AudioStarted(format) => SessionOutput::AudioStarted(format),
+                    _ => SessionOutput::AudioStopped,
+                };
+                if tx.send(output).is_err() {
                     return;
                 }
             }

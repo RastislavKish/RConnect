@@ -48,6 +48,7 @@ import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import uniffi.rconnect_ffi.AudioStreamMode
 import uniffi.rconnect_ffi.SpeechPreview
 import uniffi.rconnect_ffi.VoiceOption
 import uniffi.rconnect_ffi.VoiceSettings
@@ -68,12 +69,18 @@ class SettingsActivity : ComponentActivity() {
     private var voices by mutableStateOf<List<VoiceOption>>(emptyList())
     private var variants by mutableStateOf<List<VoiceOption>>(emptyList())
     private var keepAlive by mutableStateOf(false)
+    private var audioMode by mutableStateOf(AudioStreamMode.OFF)
+    private var audioVolume by mutableStateOf(100)
+    private var audioDucking by mutableStateOf(true)
     private var preview: SpeechPreview? = null
     private var resumed = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         keepAlive = app.settings.keepAlive
+        audioMode = app.settings.audioMode
+        audioVolume = app.settings.audioVolume
+        audioDucking = app.settings.audioDucking
         lifecycleScope.launch {
             val data = app.speechData.await()
             speechData = data
@@ -190,6 +197,20 @@ class SettingsActivity : ComponentActivity() {
                 keepAlive = value
                 app.settings.keepAlive = value
             }
+            AudioModeChoice()
+            PercentSlider(
+                label = getString(R.string.audio_volume),
+                value = audioVolume,
+                max = 100,
+                state = getString(R.string.percent, audioVolume),
+            ) { value ->
+                audioVolume = value
+                app.settings.audioVolume = value
+            }
+            SwitchRow(getString(R.string.audio_ducking), audioDucking) { value ->
+                audioDucking = value
+                app.settings.audioDucking = value
+            }
         }
 
         val current = settings
@@ -215,6 +236,43 @@ class SettingsActivity : ComponentActivity() {
                 choosingVariant = false
                 update { it.copy(variant = id) }
             }
+        }
+    }
+
+    /** Off, Auto and Always as radio buttons, each with what it does. */
+    @Composable
+    private fun AudioModeChoice() {
+        Column(Modifier.selectableGroup()) {
+            Text(getString(R.string.audio_mode))
+            for (
+                (mode, description) in listOf(
+                    AudioStreamMode.OFF to R.string.audio_mode_off_description,
+                    AudioStreamMode.AUTO to R.string.audio_mode_auto_description,
+                    AudioStreamMode.ALWAYS to R.string.audio_mode_always_description,
+                )
+            ) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .selectable(
+                            selected = mode == audioMode,
+                            role = Role.RadioButton,
+                            onClick = {
+                                audioMode = mode
+                                app.settings.audioMode = mode
+                            },
+                        )
+                        .padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    RadioButton(selected = mode == audioMode, onClick = null)
+                    Column(Modifier.padding(start = 8.dp)) {
+                        Text(getString(audioModeName(mode)))
+                        Text(getString(description), style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+            Text(getString(R.string.audio_mode_shortcut), style = MaterialTheme.typography.bodySmall)
         }
     }
 

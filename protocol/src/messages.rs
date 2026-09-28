@@ -10,6 +10,8 @@
 //!    [`SpeechEvent`] controller → host.
 //! 4. Braille: reserved, opened only when both sides announce [`Capabilities::BRAILLE`].
 //!
+//! Audio travels in QUIC datagrams rather than on a stream; see [`crate::audio`].
+//!
 //! Pairing uses a single bidirectional stream opened by the controller on the pairing
 //! ALPN, carrying [`PairRequest`] and [`PairResponse`].
 //!
@@ -74,11 +76,13 @@ pub enum ControlMessage {
     Reject(RejectReason),
     /// Either side ends the session. The connection is closed afterwards.
     EndSession(EndReason),
-    /// The controller asks for an audio stream.
-    AudioRequest(AudioDirection),
-    /// The host starts sending or expecting audio datagrams.
+    /// The controller asks for an audio stream, or for another mode of the running one.
+    AudioRequest(AudioRequest),
+    /// The host starts sending or expecting audio datagrams (see [`crate::audio`]). Sent
+    /// in answer to every [`ControlMessage::AudioRequest`] it can serve.
     AudioStarted(AudioFormat),
-    /// Either side stops the audio stream.
+    /// The controller stops the audio stream. From the host: the stream stopped, or the
+    /// request cannot be served.
     AudioStop,
     /// The controller measures the round trip time; the host answers with [`Pong`] carrying
     /// the same number.
@@ -120,6 +124,21 @@ pub enum AudioDirection {
     Duplex,
 }
 
+/// When the host sends audio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AudioMode {
+    /// Only while something audible plays.
+    Auto,
+    /// Continuously, silence included.
+    Always,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioRequest {
+    pub direction: AudioDirection,
+    pub mode: AudioMode,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AudioCodec {
     Opus,
@@ -128,6 +147,7 @@ pub enum AudioCodec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioFormat {
     pub direction: AudioDirection,
+    pub mode: AudioMode,
     pub codec: AudioCodec,
     pub sample_rate: u32,
     pub channels: u8,

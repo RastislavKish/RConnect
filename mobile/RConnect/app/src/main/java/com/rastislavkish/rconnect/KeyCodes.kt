@@ -5,6 +5,7 @@ import android.view.KeyEvent
 /** Translation of Android key events to Linux evdev key codes, which the computer uses. */
 object KeyCodes {
     const val KEY_CAPSLOCK = 58
+    const val KEY_F10 = 68
     const val KEY_F11 = 87
 
     /**

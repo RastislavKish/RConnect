@@ -11,6 +11,8 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import uniffi.rconnect_ffi.AudioSettings
+import uniffi.rconnect_ffi.AudioStreamMode
 import uniffi.rconnect_ffi.RConnect
 import uniffi.rconnect_ffi.VoiceSettings
 import uniffi.rconnect_ffi.defaultVoiceSettings
@@ -53,6 +55,13 @@ class RConnectApp : Application() {
 val Context.app: RConnectApp
     get() = applicationContext as RConnectApp
 
+/** Name of an audio stream mode, as shown and announced. */
+fun audioModeName(mode: AudioStreamMode): Int = when (mode) {
+    AudioStreamMode.OFF -> R.string.audio_mode_off
+    AudioStreamMode.AUTO -> R.string.audio_mode_auto
+    AudioStreamMode.ALWAYS -> R.string.audio_mode_always
+}
+
 /** User preferences. */
 class AppSettings(context: Context) {
     private val preferences = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
@@ -61,6 +70,34 @@ class AppSettings(context: Context) {
     var keepAlive: Boolean
         get() = preferences.getBoolean("keep_alive", false)
         set(value) = preferences.edit().putBoolean("keep_alive", value).apply()
+
+    /** When the computer streams its audio to the phone, at the start of a session. */
+    var audioMode: AudioStreamMode
+        get() = when (preferences.getString("audio_mode", null)) {
+            "auto" -> AudioStreamMode.AUTO
+            "always" -> AudioStreamMode.ALWAYS
+            else -> AudioStreamMode.OFF
+        }
+        set(value) = preferences.edit().putString(
+            "audio_mode",
+            when (value) {
+                AudioStreamMode.OFF -> "off"
+                AudioStreamMode.AUTO -> "auto"
+                AudioStreamMode.ALWAYS -> "always"
+            },
+        ).apply()
+
+    /** Volume of the computer's audio, 0 to 100. */
+    var audioVolume: Int
+        get() = preferences.getInt("audio_volume", 100)
+        set(value) = preferences.edit().putInt("audio_volume", value).apply()
+
+    /** Turn the computer's audio down while speech plays. */
+    var audioDucking: Boolean
+        get() = preferences.getBoolean("audio_ducking", true)
+        set(value) = preferences.edit().putBoolean("audio_ducking", value).apply()
+
+    fun audioSettings() = AudioSettings(audioMode, audioVolume.toUByte(), audioDucking)
 
     /**
      * The speech settings. Until the user picks a voice, the one matching the phone's

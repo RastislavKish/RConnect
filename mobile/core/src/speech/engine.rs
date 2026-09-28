@@ -19,6 +19,7 @@ use rconnect_protocol::messages::{
 
 use super::audio::Output;
 use super::espeak::{Espeak, Parameters, SynthSink};
+use super::host_audio::HostAudio;
 use super::playback::Playback;
 
 /// Length of the chunks eSpeak NG synthesizes at a time. Shorter chunks start playback
@@ -94,11 +95,12 @@ pub struct SpeechEngine {
 
 impl SpeechEngine {
     /// Starts the engine. `data_dir` contains `espeak-ng-data`. Playback events arrive on
-    /// the returned receiver as the audio is played.
+    /// the returned receiver as the audio is played. `host` is mixed into the output.
     pub fn start(
         data_dir: PathBuf,
         voice: VoiceSettings,
         keep_alive: bool,
+        host: Arc<HostAudio>,
     ) -> anyhow::Result<(SpeechEngine, UnboundedReceiver<SpeechEvent>)> {
         let (events_tx, events_rx) = unbounded_channel();
         let mut playback = Playback::new(events_tx);
@@ -114,7 +116,7 @@ impl SpeechEngine {
             std::thread::Builder::new()
                 .name("speech".into())
                 .spawn(move || {
-                    let worker = match Worker::new(&data_dir, voice, playback, generation) {
+                    let worker = match Worker::new(&data_dir, voice, playback, host, generation) {
                         Ok(worker) => {
                             let _ = ready_tx.send(Ok(()));
                             worker
@@ -195,6 +197,7 @@ struct Worker {
     espeak: Espeak,
     output: Output,
     playback: Arc<Mutex<Playback>>,
+    host_audio: Arc<HostAudio>,
     generation: Arc<AtomicU64>,
     voice: VoiceSettings,
     host: SpeechSettings,
@@ -205,14 +208,16 @@ impl Worker {
         data_dir: &std::path::Path,
         voice: VoiceSettings,
         playback: Arc<Mutex<Playback>>,
+        host: Arc<HostAudio>,
         generation: Arc<AtomicU64>,
     ) -> anyhow::Result<Worker> {
         let espeak = Espeak::new(data_dir, CHUNK_MS)?;
-        let output = Output::open(espeak.sample_rate(), playback.clone())?;
+        let output = Output::open(espeak.sample_rate(), playback.clone(), host.clone())?;
         let mut worker = Worker {
             espeak,
             output,
             playback,
+            host_audio: host,
             generation,
             voice: VoiceSettings::default(),
             host: SpeechSettings::default(),
@@ -249,7 +254,11 @@ impl Worker {
     /// Reopens the audio stream after it broke, e.g. when the output device changed.
     fn check_output(&mut self) {
         if self.output.is_broken() {
-            match Output::open(self.espeak.sample_rate(), self.playback.clone()) {
+            match Output::open(
+                self.espeak.sample_rate(),
+                self.playback.clone(),
+                self.host_audio.clone(),
+            ) {
                 Ok(output) => {
                     tracing::info!("audio output reopened");
                     self.output = output;
