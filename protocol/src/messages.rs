@@ -80,6 +80,13 @@ pub enum ControlMessage {
     AudioStarted(AudioFormat),
     /// Either side stops the audio stream.
     AudioStop,
+    /// The controller measures the round trip time; the host answers with [`Pong`] carrying
+    /// the same number.
+    ///
+    /// [`Pong`]: ControlMessage::Pong
+    Ping(u32),
+    /// The host's answer to [`ControlMessage::Ping`].
+    Pong(u32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -359,6 +366,10 @@ mod tests {
         assert_eq!(
             tag(postcard::to_allocvec(&ControlMessage::AudioStop).unwrap()),
             6
+        );
+        assert_eq!(
+            tag(postcard::to_allocvec(&ControlMessage::Pong(1)).unwrap()),
+            8
         );
         assert_eq!(tag(postcard::to_allocvec(&PairRequest::Query).unwrap()), 0);
     }

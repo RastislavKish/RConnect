@@ -3,6 +3,7 @@ package com.rastislavkish.rconnect
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
@@ -23,6 +24,7 @@ import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
+import kotlin.math.roundToInt
 import com.rastislavkish.rconnect.ui.theme.RConnectTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -72,6 +74,9 @@ class SessionActivity : ComponentActivity() {
             Button(onClick = { end() }, modifier = Modifier.fillMaxWidth()) {
                 Text(getString(R.string.end_session))
             }
+            Button(onClick = { session?.ping() }, modifier = Modifier.fillMaxWidth()) {
+                Text(getString(R.string.ping))
+            }
             Text(lastSpeech)
         }
     }
@@ -106,6 +111,15 @@ class SessionActivity : ComponentActivity() {
     private inner class Listener : SessionListener {
         override fun onSpeech(text: String) {
             runOnUiThread { lastSpeech = text }
+        }
+
+        override fun onPing(milliseconds: Double?) {
+            val message = if (milliseconds == null) {
+                getString(R.string.ping_no_answer)
+            } else {
+                getString(R.string.ping_result, milliseconds.roundToInt())
+            }
+            runOnUiThread { Toast.makeText(this@SessionActivity, message, Toast.LENGTH_SHORT).show() }
         }
 
         override fun onEnded(reason: String) {

@@ -90,6 +90,9 @@ pub struct TicketInfo {
 pub trait SessionListener: Send + Sync {
     /// Text the computer's screen reader is speaking.
     fn on_speech(&self, text: String);
+    /// Result of `SessionHandle::ping`: the round trip time in milliseconds, or none when
+    /// the computer did not answer in time.
+    fn on_ping(&self, milliseconds: Option<f64>);
     /// The session ended; `reason` is a sentence to announce.
     fn on_ended(&self, reason: String);
 }
@@ -316,6 +319,11 @@ impl SessionHandle {
         let _ = self.inputs.send(SessionInput::Key(KeyMessage::ReleaseAll));
     }
 
+    /// Measures the round trip time to the computer; the listener's `on_ping` follows.
+    pub fn ping(&self) {
+        let _ = self.inputs.send(SessionInput::Ping);
+    }
+
     /// Ends the session; the listener's `on_ended` follows.
     pub fn end(&self) {
         let _ = self.inputs.send(SessionInput::End);
@@ -457,6 +465,11 @@ struct Observer(Arc<dyn SessionListener>);
 impl SessionObserver for Observer {
     fn speech(&self, text: &str) {
         self.0.on_speech(text.to_string());
+    }
+
+    fn ping(&self, round_trip: Option<std::time::Duration>) {
+        self.0
+            .on_ping(round_trip.map(|duration| duration.as_secs_f64() * 1000.0));
     }
 }
 

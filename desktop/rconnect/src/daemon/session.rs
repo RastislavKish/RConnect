@@ -142,7 +142,7 @@ impl Daemon {
         };
 
         let ended = tokio::select! {
-            result = control_loop(&mut control_recv) => result?,
+            result = control_loop(&mut control_recv, &mut control_send) => result?,
             result = self.clone().keys_loop(connection) => result?,
             result = speech_out(speech_rx, speech_send) => result?,
             result = self.clone().speech_in(speech_recv) => result?,
@@ -235,9 +235,15 @@ impl Daemon {
     }
 }
 
-async fn control_loop(control: &mut BufReader<RecvStream>) -> anyhow::Result<Ended> {
+async fn control_loop(
+    control: &mut BufReader<RecvStream>,
+    replies: &mut SendStream,
+) -> anyhow::Result<Ended> {
     loop {
         match framing::read_message::<_, ControlMessage>(control).await {
+            Ok(Some(ControlMessage::Ping(number))) => {
+                framing::write_message(replies, &ControlMessage::Pong(number)).await?;
+            }
             Ok(Some(ControlMessage::EndSession(_))) => {
                 return Ok(Ended::ByController("ended on the phone"));
             }

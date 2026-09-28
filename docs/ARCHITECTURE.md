@@ -429,6 +429,8 @@ EndSession { reason: EndReason }        // user shortcut, desktop shutdown, repl
 AudioRequest { direction: AudioDir }    // desktop→phone, phone→desktop, duplex
 AudioStarted { direction: AudioDir, codec: Codec, sample_rate: u32, frame_ms: u8 }
 AudioStop
+Ping(u32)                               // phone measures the round trip time
+Pong(u32)                               // desktop's answer, same number
 ```
 The capabilities bitset contains `BRAILLE`, `AUDIO_OUT`, `AUDIO_IN`, and future bits.
 

@@ -31,6 +31,9 @@
     <string name="connected_to">Connected to %1$s. Press CapsLock+F11 to end the session.</string>
     <string name="connection_failed">Connection failed.</string>
     <string name="end_session">End session</string>
+    <string name="ping">Ping</string>
+    <string name="ping_result">Ping: %1$d ms</string>
+    <string name="ping_no_answer">Ping: no answer from the computer</string>
 
     <string name="settings">Settings</string>
     <string name="speech">Speech</string>

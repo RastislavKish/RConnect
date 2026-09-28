@@ -174,8 +174,11 @@ async fn session(controller: &Controller, host: &Host) -> anyhow::Result<()> {
                         let _ = input_tx.send(SessionInput::Key(key));
                     }
                 }
+                Some(Command::Ping) => {
+                    let _ = input_tx.send(SessionInput::Ping);
+                }
                 Some(Command::End) => break,
-                None => println!("? commands: k <codes>, d <code>, u <code>, t <text>, end"),
+                None => println!("? commands: k <codes>, d <code>, u <code>, t <text>, ping, end"),
             }
         }
         let _ = input_tx.send(SessionInput::End);
@@ -197,10 +200,18 @@ impl SessionObserver for Printer {
     fn speech(&self, text: &str) {
         println!("> {text}");
     }
+
+    fn ping(&self, round_trip: Option<Duration>) {
+        match round_trip {
+            Some(round_trip) => println!("Ping: {round_trip:?}"),
+            None => println!("Ping: no answer"),
+        }
+    }
 }
 
 enum Command {
     Keys(Vec<KeyMessage>),
+    Ping,
     End,
 }
 
@@ -210,6 +221,7 @@ fn parse_command(line: &str) -> Option<Command> {
         || -> Option<Vec<u16>> { rest.split_whitespace().map(|c| c.parse().ok()).collect() };
     Some(match command {
         "end" => Command::End,
+        "ping" => Command::Ping,
         "d" => Command::Keys(codes()?.into_iter().map(KeyMessage::Down).collect()),
         "u" => Command::Keys(codes()?.into_iter().map(KeyMessage::Up).collect()),
         "k" => {

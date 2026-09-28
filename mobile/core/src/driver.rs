@@ -2,9 +2,11 @@
 //! back to the host, and keys from the user interface go to the host.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use rconnect_protocol::messages::{KeyMessage, SpeechCommand, SpeechEvent};
 use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::time::Instant;
 
 use crate::speech::{SpeechEngine, VoiceSettings};
 use crate::{Session, SessionEnd, SessionOutput};
@@ -13,6 +15,9 @@ use crate::{Session, SessionEnd, SessionOutput};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionInput {
     Key(KeyMessage),
+    /// Measure the round trip time to the host; the result goes to
+    /// [`SessionObserver::ping`].
+    Ping,
     /// End the session from the controller.
     End,
 }
@@ -29,7 +34,13 @@ pub struct SpeechConfig {
 /// Observes a running session, e.g. to show the spoken text on screen.
 pub trait SessionObserver: Send + Sync {
     fn speech(&self, _text: &str) {}
+    /// Round trip time of a [`SessionInput::Ping`], or `None` when the host did not answer
+    /// within [`PING_TIMEOUT`].
+    fn ping(&self, _round_trip: Option<Duration>) {}
 }
+
+/// How long to wait for the host's answer to a ping.
+pub const PING_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Runs the session until it ends and returns why it ended.
 pub async fn drive_session(
@@ -49,6 +60,9 @@ pub async fn drive_session(
                 (None, None)
             }
         };
+    // Number and send time of the ping waiting for an answer. A new ping replaces it.
+    let mut ping: Option<(u32, Instant)> = None;
+    let mut next_ping = 0u32;
 
     loop {
         tokio::select! {
@@ -57,6 +71,13 @@ pub async fn drive_session(
                     if let Some(event) = play(engine.as_ref(), command, observer)
                         && session.send_speech_event(event).await.is_err() {
                             return SessionEnd::ConnectionLost;
+                        }
+                }
+                Some(SessionOutput::Pong(number)) => {
+                    if let Some((sent_number, sent)) = ping
+                        && sent_number == number {
+                            observer.ping(Some(sent.elapsed()));
+                            ping = None;
                         }
                 }
                 Some(SessionOutput::Ended(end)) => return end,
@@ -73,12 +94,30 @@ pub async fn drive_session(
                         return SessionEnd::ConnectionLost;
                     }
                 }
+                Some(SessionInput::Ping) => {
+                    next_ping = next_ping.wrapping_add(1);
+                    ping = Some((next_ping, Instant::now()));
+                    if session.send_ping(next_ping).await.is_err() {
+                        return SessionEnd::ConnectionLost;
+                    }
+                }
                 Some(SessionInput::End) | None => {
                     session.end().await;
                     return SessionEnd::ByController;
                 }
             },
+            _ = ping_expired(ping) => {
+                observer.ping(None);
+                ping = None;
+            }
         }
+    }
+}
+
+async fn ping_expired(ping: Option<(u32, Instant)>) {
+    match ping {
+        Some((_, sent)) => tokio::time::sleep_until(sent + PING_TIMEOUT).await,
+        None => std::future::pending().await,
     }
 }
 

@@ -363,6 +363,8 @@ pub enum SessionEnd {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionOutput {
     Speech(SpeechCommand),
+    /// The host's answer to [`Session::send_ping`].
+    Pong(u32),
     /// The session is over; nothing follows.
     Ended(SessionEnd),
 }
@@ -379,6 +381,12 @@ pub struct Session {
 impl Session {
     pub async fn send_key(&mut self, message: KeyMessage) -> anyhow::Result<()> {
         framing::write_message(&mut self.keys, &message).await?;
+        Ok(())
+    }
+
+    /// Asks the host to answer with [`SessionOutput::Pong`] carrying `number`.
+    pub async fn send_ping(&mut self, number: u32) -> anyhow::Result<()> {
+        framing::write_message(&mut self.control, &ControlMessage::Ping(number)).await?;
         Ok(())
     }
 
@@ -423,6 +431,11 @@ async fn read_control(mut stream: BufReader<RecvStream>, tx: mpsc::UnboundedSend
     let end = loop {
         match framing::read_message::<_, ControlMessage>(&mut stream).await {
             Ok(Some(ControlMessage::EndSession(reason))) => break SessionEnd::ByHost(reason),
+            Ok(Some(ControlMessage::Pong(number))) => {
+                if tx.send(SessionOutput::Pong(number)).is_err() {
+                    return;
+                }
+            }
             Ok(Some(_)) => {}
             Err(e) if e.is_recoverable() => {}
             Ok(None) | Err(_) => break SessionEnd::ConnectionLost,
