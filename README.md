@@ -6,8 +6,8 @@ attached. Keys go from the phone to the computer, and the text the screen reader
 comes back to the phone, where it is synthesized locally. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design.
 
-Status: the desktop side works. The Android app builds but is not tested on a device yet.
-`rconnect-dev-controller` stands in for it during development.
+Status: the desktop side and the Android app work. `rconnect-dev-controller` can stand
+in for the app during development.
 
 ## Desktop installation
 
