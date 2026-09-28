@@ -13,7 +13,9 @@ in for the app during development.
 
 The reference setup is GNOME with Orca and speech-dispatcher.
 
-1. Build and install the binary:
+1. Build and install the binary. It needs the PipeWire and Opus development files, as
+   well as clang (on openSUSE `pipewire-devel`, `libopus-devel` and `clang`; on Debian
+   and Ubuntu `libpipewire-0.3-dev`, `libopus-dev` and `libclang-dev`):
 
    ```sh
    cargo install --path desktop/rconnect
@@ -71,7 +73,27 @@ The reference setup is GNOME with Orca and speech-dispatcher.
 name = "My laptop"
 # Keep speaking on this computer during a session (default: true).
 local_speech = true
+# How the phone's audio stream is captured (default: "streams"). "streams" taps each
+# application's playback, leaving out speech-dispatcher; "monitor" captures everything
+# the speakers play and turns local speech off while it streams; "off" disables the
+# audio stream.
+audio = "streams"
 ```
+
+## Audio from the computer
+
+Besides speech, the phone can play the computer's own audio: videos, audio CAPTCHAs,
+Orca's progress beeps. Choose the mode in the app's settings, or switch it during a
+session with CapsLock+F10:
+
+- **Off** (default): no audio from the computer, and no cost at all.
+- **Auto:** audio streams only while something is playing.
+- **Always:** audio streams all the time, silence included.
+
+The settings also have a volume for the computer's audio, and whether to turn it down
+while speech plays. The computer's audio reaches the phone about 50 to 120 ms after it
+plays, more with Bluetooth headphones. Muting the computer does not mute the stream, so
+the computer can stay silent while the phone plays its audio.
 
 ## Commands
 
@@ -87,7 +109,7 @@ local_speech = true
 
 Requirements: the Android SDK and NDK, Rust with the `aarch64-linux-android` and
 `x86_64-linux-android` targets, `cargo-ndk`, CMake and a C compiler. Check out the eSpeak
-NG and sonic submodules first:
+NG, sonic and Opus submodules first:
 
 ```sh
 git submodule update --init
@@ -142,6 +164,10 @@ If TLP is installed, it sets Wi-Fi power saving itself when switching between ma
 battery; set `WIFI_PWR_ON_AC=off` and `WIFI_PWR_ON_BAT=off` in `/etc/tlp.conf` too. The
 cost is some battery life while on battery.
 
+While the computer's audio streams, the Wi-Fi radios stay awake, which hides power saving:
+pings can look fine in Always mode, or while something plays in Auto, and still jump
+once the stream is quiet.
+
 A relayed connection is slower than a direct one, since everything passes through a
 server on the internet; it is used when the two devices cannot reach each other directly.
 
@@ -150,6 +176,7 @@ server on the internet; it is used when the two devices cannot reach each other 
 - `rconnect speech-monitor [--mirror]` stands in for the daemon and the phone, printing
   what the speech module sends.
 - `rconnect-dev-controller pair <link> | hosts | session` (from `mobile/core`) stands in
-  for the phone app.
+  for the phone app. In a session, `audio off|auto|always` switches the audio stream;
+  `RUST_LOG=rconnect_core=debug` shows when bursts start and end.
 - `RCONNECT_RUNTIME_DIR`, `RCONNECT_DATA_DIR`, `RCONNECT_CONFIG_DIR` and
   `RCONNECT_CONTROLLER_DIR` move all state, so tests do not touch a real installation.

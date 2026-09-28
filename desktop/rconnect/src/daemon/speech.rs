@@ -68,6 +68,18 @@ impl SpeechHub {
         inner.send_to_module(DaemonMessage::SetMode(mode));
     }
 
+    /// Changes the output mode of an attached session.
+    pub fn set_mode(&self, token: u64, mode: OutputMode) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(session) = inner.session.as_mut()
+            && session.token == token
+            && session.mode != mode
+        {
+            session.mode = mode;
+            inner.send_to_module(DaemonMessage::SetMode(mode));
+        }
+    }
+
     /// Returns speech to the local synthesizer, unless another session has attached since.
     pub fn detach(&self, token: u64) {
         let mut inner = self.inner.lock().unwrap();

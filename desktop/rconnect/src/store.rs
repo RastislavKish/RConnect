@@ -143,6 +143,20 @@ pub struct Config {
     pub name: String,
     /// Keep speaking on this computer during a session.
     pub local_speech: bool,
+    /// How audio is captured for the phone's audio stream.
+    pub audio: AudioCapture,
+}
+
+/// How audio is captured when the phone asks for it (see `docs/ARCHITECTURE.md`, §5.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AudioCapture {
+    /// Tap each application's stream, leaving out speech-dispatcher.
+    Streams,
+    /// Capture the default sink's monitor. Local speech is turned off while it runs.
+    Monitor,
+    /// Never stream audio.
+    Off,
 }
 
 impl Default for Config {
@@ -150,6 +164,7 @@ impl Default for Config {
         Config {
             name: hostname(),
             local_speech: true,
+            audio: AudioCapture::Streams,
         }
     }
 }

@@ -192,6 +192,10 @@ impl Inner {
                     self.next = *self.packets.keys().next().unwrap();
                     self.concealed = 0;
                     self.state = State::Playing;
+                    tracing::debug!(
+                        "host audio plays ({} packets buffered, fresh burst: {fresh})",
+                        self.packets.len()
+                    );
                 }
                 State::Playing => self.decode_next(),
             }
@@ -223,6 +227,7 @@ impl Inner {
                 Err(e) => tracing::debug!("dropping undecodable host audio: {e}"),
             }
             if packet.end_of_burst {
+                tracing::debug!("host audio burst ended");
                 self.state = State::Idle;
                 self.packets.clear();
             }
@@ -236,6 +241,7 @@ impl Inner {
             self.state = State::Buffering { fresh: false };
             self.target = (self.target + 1).min(MAX_TARGET);
             self.stable_frames = 0;
+            tracing::debug!("host audio ran dry; buffering {} packets", self.target);
             return;
         }
         self.concealed += 1;

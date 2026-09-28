@@ -1,5 +1,6 @@
 //! `rconnect daemon`: accepts pairing and session connections from phones.
 
+mod audio;
 mod inhibit;
 mod keyboard;
 mod pairing;
@@ -53,6 +54,7 @@ async fn run_async() -> anyhow::Result<()> {
     let transport = QuicTransportConfig::builder()
         .max_idle_timeout(Some(IDLE_TIMEOUT.try_into()?))
         .keep_alive_interval(KEEP_ALIVE_INTERVAL)
+        .datagram_send_buffer_size(audio::DATAGRAM_SEND_BUFFER)
         .build();
     let endpoint = Endpoint::builder(presets::N0)
         .secret_key(secret_key)

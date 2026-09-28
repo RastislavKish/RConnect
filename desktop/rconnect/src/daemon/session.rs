@@ -10,16 +10,18 @@ use anyhow::Context;
 use iroh::EndpointId;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use rconnect_protocol::messages::{
-    Capabilities, ControlMessage, EndReason, Handshake, KeyMessage, RejectReason, SpeechCommand,
-    SpeechEvent,
+    AudioDirection, AudioRequest, Capabilities, ControlMessage, EndReason, Handshake, KeyMessage,
+    RejectReason, SpeechCommand, SpeechEvent,
 };
 use rconnect_protocol::{PROTOCOL_VERSION, framing};
 use tokio::io::BufReader;
 use tokio::sync::{mpsc, oneshot};
 
 use super::Daemon;
+use super::audio::{AudioStream, CaptureKind};
 use super::inhibit::SleepInhibitor;
 use crate::speech::ipc::OutputMode;
+use crate::store::AudioCapture;
 
 /// Priority of the speech stream; keys arrive on a stream the phone sends, where the phone
 /// sets its own priority.
@@ -114,23 +116,24 @@ impl Daemon {
         mut control_recv: BufReader<RecvStream>,
         end_rx: oneshot::Receiver<EndReason>,
     ) -> anyhow::Result<Ended> {
+        let capabilities = if self.config.audio == AudioCapture::Off {
+            Capabilities::NONE
+        } else {
+            Capabilities::AUDIO_TO_CONTROLLER
+        };
         let welcome = ControlMessage::Welcome(Handshake {
             protocol_version: PROTOCOL_VERSION,
             app_version: env!("CARGO_PKG_VERSION").into(),
             device_name: self.config.name.clone(),
-            capabilities: Capabilities::NONE,
+            capabilities,
         });
         framing::write_message(&mut control_send, &welcome).await?;
 
         let (speech_send, speech_recv) = connection.open_bi().await?;
         speech_send.set_priority(SPEECH_PRIORITY)?;
         let (speech_tx, speech_rx) = mpsc::unbounded_channel();
-        let mode = if self.config.local_speech {
-            OutputMode::Mirror
-        } else {
-            OutputMode::Remote
-        };
-        self.speech.attach(token, speech_tx, mode);
+        self.speech
+            .attach(token, speech_tx, self.speech_mode(false));
 
         self.keyboard.lock().unwrap().ensure_device();
         let _inhibitor = match SleepInhibitor::acquire().await {
@@ -142,7 +145,7 @@ impl Daemon {
         };
 
         let ended = tokio::select! {
-            result = control_loop(&mut control_recv, &mut control_send) => result?,
+            result = self.control_loop(connection, token, &mut control_recv, &mut control_send) => result?,
             result = self.clone().keys_loop(connection) => result?,
             result = speech_out(speech_rx, speech_send) => result?,
             result = self.clone().speech_in(speech_recv) => result?,
@@ -235,26 +238,87 @@ impl Daemon {
     }
 }
 
-async fn control_loop(
-    control: &mut BufReader<RecvStream>,
-    replies: &mut SendStream,
-) -> anyhow::Result<Ended> {
-    loop {
-        match framing::read_message::<_, ControlMessage>(control).await {
-            Ok(Some(ControlMessage::Ping(number))) => {
-                framing::write_message(replies, &ControlMessage::Pong(number)).await?;
+impl Daemon {
+    /// Where speech plays. Capturing the sink's monitor would repeat local speech on the
+    /// phone, so it is kept off the laptop while the monitor is captured.
+    fn speech_mode(&self, capturing_monitor: bool) -> OutputMode {
+        if self.config.local_speech && !capturing_monitor {
+            OutputMode::Mirror
+        } else {
+            OutputMode::Remote
+        }
+    }
+
+    async fn control_loop(
+        &self,
+        connection: &Connection,
+        token: u64,
+        control: &mut BufReader<RecvStream>,
+        replies: &mut SendStream,
+    ) -> anyhow::Result<Ended> {
+        let mut audio: Option<AudioStream> = None;
+        loop {
+            match framing::read_message::<_, ControlMessage>(control).await {
+                Ok(Some(ControlMessage::Ping(number))) => {
+                    framing::write_message(replies, &ControlMessage::Pong(number)).await?;
+                }
+                Ok(Some(ControlMessage::EndSession(_))) => {
+                    return Ok(Ended::ByController("ended on the phone"));
+                }
+                Ok(Some(ControlMessage::AudioRequest(request))) => {
+                    let reply = self.start_audio(connection, token, &mut audio, request);
+                    framing::write_message(replies, &reply).await?;
+                }
+                Ok(Some(ControlMessage::AudioStop)) => {
+                    if audio.take().is_some() {
+                        self.speech.set_mode(token, self.speech_mode(false));
+                    }
+                    framing::write_message(replies, &ControlMessage::AudioStop).await?;
+                }
+                Ok(Some(other)) => tracing::warn!("unexpected control message {other:?}"),
+                Ok(None) => return Ok(Ended::ByController("control stream closed")),
+                Err(e) if e.is_recoverable() => tracing::warn!("ignoring control message: {e}"),
+                Err(e) => return Err(e.into()),
             }
-            Ok(Some(ControlMessage::EndSession(_))) => {
-                return Ok(Ended::ByController("ended on the phone"));
+        }
+    }
+
+    /// Starts the audio stream or changes its mode, and returns the answer for the phone.
+    fn start_audio(
+        &self,
+        connection: &Connection,
+        token: u64,
+        audio: &mut Option<AudioStream>,
+        request: AudioRequest,
+    ) -> ControlMessage {
+        let kind = match self.config.audio {
+            AudioCapture::Streams => CaptureKind::Streams,
+            AudioCapture::Monitor => CaptureKind::Monitor,
+            AudioCapture::Off => return ControlMessage::AudioStop,
+        };
+        if request.direction != AudioDirection::ToController {
+            return ControlMessage::AudioStop;
+        }
+        if let Some(stream) = audio {
+            stream.set_mode(request.mode);
+            return ControlMessage::AudioStarted(AudioStream::format(request.mode));
+        }
+        // Connecting to PipeWire takes a moment; don't hold up other sessions' tasks.
+        let started = tokio::task::block_in_place(|| {
+            AudioStream::start(connection.clone(), request.mode, kind)
+        });
+        match started {
+            Ok(stream) => {
+                if kind == CaptureKind::Monitor {
+                    self.speech.set_mode(token, self.speech_mode(true));
+                }
+                *audio = Some(stream);
+                ControlMessage::AudioStarted(AudioStream::format(request.mode))
             }
-            Ok(Some(ControlMessage::AudioRequest(_))) => {
-                // Audio streaming is not implemented yet; the phone sees no AudioStarted.
-                tracing::info!("ignoring audio request");
+            Err(e) => {
+                tracing::warn!("cannot stream audio: {e:#}");
+                ControlMessage::AudioStop
             }
-            Ok(Some(other)) => tracing::warn!("unexpected control message {other:?}"),
-            Ok(None) => return Ok(Ended::ByController("control stream closed")),
-            Err(e) if e.is_recoverable() => tracing::warn!("ignoring control message: {e}"),
-            Err(e) => return Err(e.into()),
         }
     }
 }
