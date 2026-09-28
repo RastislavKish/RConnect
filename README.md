@@ -59,6 +59,9 @@ The reference setup is GNOME with Orca and speech-dispatcher.
 
 5. Pair a phone with `rconnect pair`, and check the state with `rconnect status`.
 
+6. If the computer is on Wi-Fi, turn off Wi-Fi power saving, or speech can lag by up to
+   about 100 ms. See [Latency](#latency).
+
 ## Configuration
 
 `~/.config/rconnect/config.toml`:
@@ -101,6 +104,46 @@ settings, so that keys the system handles itself (Alt+Tab, the Meta key) reach t
 computer too. To pair, run `rconnect pair` on the computer, then in RConnect choose
 "Pair a computer" and pick the computer from the local network list, scan the QR code
 with any QR code scanner app (which opens RConnect), or paste the pairing link.
+
+## Latency
+
+The Ping button on the phone's session screen shows the round trip time to the computer
+and whether the connection is direct or goes through a relay server. On a local network
+it should be a few milliseconds.
+
+If pings jump between a few milliseconds and about 100 ms, Wi-Fi power saving is the
+usual cause. A sleeping Wi-Fi radio wakes up only at the router's beacons, about every
+100 ms, and whatever is sent to it waits at the router until then. The phone turns power
+saving off during sessions by itself, but a laptop running RConnect has to be configured.
+GNOME and KDE do not offer this setting, so use NetworkManager directly.
+
+Check the current state (find the interface name with `iw dev`):
+
+```sh
+iw dev wlan0 get power_save
+```
+
+Turn it off for one network (`2` is off, `3` on, `0` the global default):
+
+```sh
+nmcli connection modify "<network name>" 802-11-wireless.powersave 2
+nmcli connection up "<network name>"
+```
+
+Or for all networks, in `/etc/NetworkManager/conf.d/wifi-powersave.conf`, followed by
+`sudo systemctl restart NetworkManager`:
+
+```ini
+[connection]
+wifi.powersave = 2
+```
+
+If TLP is installed, it sets Wi-Fi power saving itself when switching between mains and
+battery; set `WIFI_PWR_ON_AC=off` and `WIFI_PWR_ON_BAT=off` in `/etc/tlp.conf` too. The
+cost is some battery life while on battery.
+
+A relayed connection is slower than a direct one, since everything passes through a
+server on the internet; it is used when the two devices cannot reach each other directly.
 
 ## Development
 
