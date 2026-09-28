@@ -9,7 +9,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::Instant;
 
 use crate::speech::{SpeechEngine, VoiceSettings};
-use crate::{Session, SessionEnd, SessionOutput};
+use crate::{ConnectionPath, Session, SessionEnd, SessionOutput};
 
 /// What the user interface sends to a running session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,8 +35,8 @@ pub struct SpeechConfig {
 pub trait SessionObserver: Send + Sync {
     fn speech(&self, _text: &str) {}
     /// Round trip time of a [`SessionInput::Ping`], or `None` when the host did not answer
-    /// within [`PING_TIMEOUT`].
-    fn ping(&self, _round_trip: Option<Duration>) {}
+    /// within [`PING_TIMEOUT`], and the path the connection uses at that moment.
+    fn ping(&self, _round_trip: Option<Duration>, _path: ConnectionPath) {}
 }
 
 /// How long to wait for the host's answer to a ping.
@@ -76,7 +76,7 @@ pub async fn drive_session(
                 Some(SessionOutput::Pong(number)) => {
                     if let Some((sent_number, sent)) = ping
                         && sent_number == number {
-                            observer.ping(Some(sent.elapsed()));
+                            observer.ping(Some(sent.elapsed()), session.path());
                             ping = None;
                         }
                 }
@@ -107,7 +107,7 @@ pub async fn drive_session(
                 }
             },
             _ = ping_expired(ping) => {
-                observer.ping(None);
+                observer.ping(None, session.path());
                 ping = None;
             }
         }

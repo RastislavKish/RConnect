@@ -369,6 +369,17 @@ pub enum SessionOutput {
     Ended(SessionEnd),
 }
 
+/// The network path a session's data takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionPath {
+    /// Straight to the host's IP address.
+    Direct,
+    /// Through an iroh relay server.
+    Relayed,
+    /// No path is selected, e.g. while the connection is closing.
+    Unknown,
+}
+
 pub struct Session {
     pub host_name: String,
     connection: Connection,
@@ -382,6 +393,16 @@ impl Session {
     pub async fn send_key(&mut self, message: KeyMessage) -> anyhow::Result<()> {
         framing::write_message(&mut self.keys, &message).await?;
         Ok(())
+    }
+
+    /// The path currently used for sending data to the host.
+    pub fn path(&self) -> ConnectionPath {
+        let paths = self.connection.paths();
+        match paths.iter().find(|path| path.is_selected()) {
+            Some(path) if path.is_relay() => ConnectionPath::Relayed,
+            Some(_) => ConnectionPath::Direct,
+            None => ConnectionPath::Unknown,
+        }
     }
 
     /// Asks the host to answer with [`SessionOutput::Pong`] carrying `number`.

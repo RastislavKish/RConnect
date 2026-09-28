@@ -21,7 +21,8 @@ use rconnect_core::speech::VoiceSettings;
 use std::time::Duration;
 
 use rconnect_core::{
-    Controller, Discovery, Host, SessionInput, SessionObserver, SpeechConfig, drive_session,
+    ConnectionPath, Controller, Discovery, Host, SessionInput, SessionObserver, SpeechConfig,
+    drive_session,
 };
 use rconnect_protocol::messages::KeyMessage;
 use rconnect_protocol::ticket::PairingTicket;
@@ -201,10 +202,10 @@ impl SessionObserver for Printer {
         println!("> {text}");
     }
 
-    fn ping(&self, round_trip: Option<Duration>) {
+    fn ping(&self, round_trip: Option<Duration>, path: ConnectionPath) {
         match round_trip {
-            Some(round_trip) => println!("Ping: {round_trip:?}"),
-            None => println!("Ping: no answer"),
+            Some(round_trip) => println!("Ping: {round_trip:?}, {path:?}"),
+            None => println!("Ping: no answer, {path:?}"),
         }
     }
 }

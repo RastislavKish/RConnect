@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use rconnect_core::speech::{self, SpeechEngine};
 use rconnect_core::{
-    ConnectError, Controller, Discovery, Host, PairError, SessionEnd, SessionInput,
-    SessionObserver, SpeechConfig, drive_session,
+    ConnectError, ConnectionPath as CorePath, Controller, Discovery, Host, PairError, SessionEnd,
+    SessionInput, SessionObserver, SpeechConfig, drive_session,
 };
 use rconnect_protocol::messages::{EndReason, KeyMessage, SpeechKind, Utterance};
 use rconnect_protocol::ticket::PairingTicket;
@@ -91,10 +91,30 @@ pub trait SessionListener: Send + Sync {
     /// Text the computer's screen reader is speaking.
     fn on_speech(&self, text: String);
     /// Result of `SessionHandle::ping`: the round trip time in milliseconds, or none when
-    /// the computer did not answer in time.
-    fn on_ping(&self, milliseconds: Option<f64>);
+    /// the computer did not answer in time, and the path the connection uses.
+    fn on_ping(&self, milliseconds: Option<f64>, path: ConnectionPath);
     /// The session ended; `reason` is a sentence to announce.
     fn on_ended(&self, reason: String);
+}
+
+/// The network path a session's data takes.
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum ConnectionPath {
+    /// Straight to the computer's IP address.
+    Direct,
+    /// Through an iroh relay server.
+    Relayed,
+    Unknown,
+}
+
+impl From<CorePath> for ConnectionPath {
+    fn from(path: CorePath) -> Self {
+        match path {
+            CorePath::Direct => ConnectionPath::Direct,
+            CorePath::Relayed => ConnectionPath::Relayed,
+            CorePath::Unknown => ConnectionPath::Unknown,
+        }
+    }
 }
 
 #[derive(uniffi::Object)]
@@ -467,9 +487,11 @@ impl SessionObserver for Observer {
         self.0.on_speech(text.to_string());
     }
 
-    fn ping(&self, round_trip: Option<std::time::Duration>) {
-        self.0
-            .on_ping(round_trip.map(|duration| duration.as_secs_f64() * 1000.0));
+    fn ping(&self, round_trip: Option<std::time::Duration>, path: CorePath) {
+        self.0.on_ping(
+            round_trip.map(|duration| duration.as_secs_f64() * 1000.0),
+            path.into(),
+        );
     }
 }
 

@@ -32,6 +32,7 @@ import com.rastislavkish.rconnect.ui.theme.RConnectTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import uniffi.rconnect_ffi.ConnectionPath
 import uniffi.rconnect_ffi.RConnectException
 import uniffi.rconnect_ffi.SessionHandle
 import uniffi.rconnect_ffi.SessionListener
@@ -118,11 +119,18 @@ class SessionActivity : ComponentActivity() {
             runOnUiThread { lastSpeech = text }
         }
 
-        override fun onPing(milliseconds: Double?) {
+        override fun onPing(milliseconds: Double?, path: ConnectionPath) {
+            val pathName = getString(
+                when (path) {
+                    ConnectionPath.DIRECT -> R.string.path_direct
+                    ConnectionPath.RELAYED -> R.string.path_relayed
+                    ConnectionPath.UNKNOWN -> R.string.path_unknown
+                },
+            )
             val message = if (milliseconds == null) {
-                getString(R.string.ping_no_answer)
+                getString(R.string.ping_no_answer, pathName)
             } else {
-                getString(R.string.ping_result, milliseconds.roundToInt())
+                getString(R.string.ping_result, milliseconds.roundToInt(), pathName)
             }
             runOnUiThread { Toast.makeText(this@SessionActivity, message, Toast.LENGTH_SHORT).show() }
         }
