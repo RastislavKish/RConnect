@@ -5,7 +5,15 @@
 //! process callback takes it from a [`StreamPlayer`], which the session feeds with the
 //! phone's datagrams, and plays silence while there are none: muted, between VAD bursts,
 //! or when the phone's microphone is unavailable.
+//!
+//! When the source disappears, something in the desktop (GNOME's sound settings, as far
+//! as testing shows) replaces the user's configured default source with the remaining
+//! one, so WirePlumber would not choose it again. The daemon therefore notes, before
+//! removing it, whether it was the configured default, and restores that when it
+//! creates the source again.
 
+use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -16,6 +24,7 @@ use rconnect_audio::StreamPlayer;
 
 use super::RATE;
 use super::capture::format_pod;
+use crate::paths;
 
 /// Name of the source node. It never changes, so WirePlumber can remember it as the
 /// default source.
@@ -51,6 +60,12 @@ impl VirtualMic {
             })?;
         ready_rx.recv().context("the microphone thread stopped")??;
         tracing::info!("created the virtual microphone");
+        if default_marker().exists() {
+            match set_configured_default() {
+                Ok(()) => tracing::info!("made the virtual microphone the default again"),
+                Err(e) => tracing::warn!("cannot make the virtual microphone the default: {e:#}"),
+            }
+        }
         Ok(VirtualMic {
             player,
             stop,
@@ -66,6 +81,18 @@ impl VirtualMic {
 
 impl Drop for VirtualMic {
     fn drop(&mut self) {
+        // Read before removing it: removing it makes the desktop configure another one.
+        match configured_default() {
+            Ok(name) if name.as_deref() == Some(NODE_NAME) => {
+                if let Err(e) = std::fs::write(default_marker(), "") {
+                    tracing::warn!("cannot remember the default microphone: {e}");
+                }
+            }
+            Ok(_) => {
+                let _ = std::fs::remove_file(default_marker());
+            }
+            Err(e) => tracing::debug!("cannot read the default microphone: {e:#}"),
+        }
         let _ = self.stop.send(());
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -123,6 +150,46 @@ fn run(
     Ok(())
 }
 
+/// Present while the user's configured default source is the virtual microphone.
+fn default_marker() -> PathBuf {
+    paths::data_dir().join("microphone-is-default")
+}
+
+const CONFIGURED_SOURCE: &str = "default.configured.audio.source";
+
+/// The `node.name` of the user's configured default source, from WirePlumber's metadata.
+fn configured_default() -> anyhow::Result<Option<String>> {
+    let output = Command::new("pw-metadata")
+        .args(["-n", "default", "0", CONFIGURED_SOURCE])
+        .output()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_configured(&text))
+}
+
+/// Parses `update: id:0 key:'…' value:'{ "name": "…" }' type:'Spa:String:JSON'`.
+fn parse_configured(text: &str) -> Option<String> {
+    let value = text.split("value:'").nth(1)?.split('\'').next()?;
+    let name = value.split("\"name\"").nth(1)?.split('"').nth(1)?;
+    Some(name.to_owned())
+}
+
+/// Makes the virtual microphone the configured default; WirePlumber applies and saves it.
+fn set_configured_default() -> anyhow::Result<()> {
+    let status = Command::new("pw-metadata")
+        .args([
+            "-n",
+            "default",
+            "0",
+            CONFIGURED_SOURCE,
+            &format!("{{ \"name\": \"{NODE_NAME}\" }}"),
+            "Spa:String:JSON",
+        ])
+        .output()?
+        .status;
+    anyhow::ensure!(status.success(), "pw-metadata failed");
+    Ok(())
+}
+
 /// Produces the frames PipeWire asks for. The safe buffer wrapper does not expose how
 /// many that is, and filling the whole buffer would add latency, so this uses the raw
 /// `pw_buffer`.
@@ -154,5 +221,18 @@ fn fill(stream: &pw::stream::Stream, player: &StreamPlayer) {
             }
         }
         stream.queue_raw_buffer(raw);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_pw_metadata() {
+        let text = "Found \"default\" metadata 41\nupdate: id:0 key:'default.configured.audio.source' \
+                    value:'{ \"name\": \"rconnect-microphone\" }' type:'Spa:String:JSON'\n";
+        assert_eq!(parse_configured(text), Some("rconnect-microphone".into()));
+        assert_eq!(parse_configured("Found \"default\" metadata 41\n"), None);
     }
 }

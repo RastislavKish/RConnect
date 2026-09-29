@@ -725,9 +725,16 @@ Countermeasures are listed in §7.
 - The process callback produces exactly the frames PipeWire asks for
   (`pw_buffer.requested`), read from the raw buffer because the Rust wrapper does not
   expose it. Filling the whole buffer, as PipeWire's examples do, would add latency.
-- The name never changes. WirePlumber remembers the user's default source by name, so
-  a user who chose it as the default once gets it back whenever it appears, and the
-  previous default when it goes **(verify)**.
+- The name never changes, since WirePlumber keeps the user's default source by name
+  (`default.configured.audio.source`). That alone is not enough: as soon as the source
+  disappears, the desktop (GNOME, in testing) configures the remaining microphone as
+  the default in its place, so WirePlumber never chooses the virtual one again. So
+  before removing the source, the daemon reads the configured default with
+  `pw-metadata`; if it is the virtual microphone, it leaves a `microphone-is-default`
+  marker in its data directory. When it creates the source again, it sets the
+  configured default back with `pw-metadata`, which WirePlumber applies and saves. A
+  user who picks another microphone while the virtual one exists clears the marker at
+  the next removal. Tested with WirePlumber 0.5.15 across removals and sessions.
 - PipeWire pulls audio from it; its process callback takes samples from the jitter
   buffer, and plays silence while the buffer is empty, while muted and between VAD
   bursts. Clock drift is corrected the same way as on the phone (§5.6), because the
@@ -890,8 +897,7 @@ Low-priority experiments for later:
 - [x] Microphone (§5.7), tested with the dev controller and a generated tone: the source
       appears as `Audio/Source`, records the tone when unmuted and silence when muted,
       and disappears on Off and at session end.
-- [ ] Microphone (§5.7): whether WirePlumber restores a default source by name, whether
-      an explicit built-in input keeps a Bluetooth headset on A2DP, how long AAudio takes
+- [ ] Microphone (§5.7): whether an explicit built-in input keeps a Bluetooth headset on A2DP, how long AAudio takes
       to open an input on real devices, whether browsers and call applications list the
       source, and Earshot with a real voice.
 - [ ] Audio stream (§5.6): EasyEffects and filter chains, where stream volume is applied

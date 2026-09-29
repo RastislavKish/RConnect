@@ -11,7 +11,6 @@ import android.os.Build
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.WindowManager
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
@@ -56,6 +55,8 @@ class SessionActivity : ComponentActivity(), KeyRouter.Shortcuts {
     private var status by mutableStateOf("")
     /** Last text spoken by the computer, shown for sighted helpers; never announced. */
     private var lastSpeech by mutableStateOf("")
+    /** The last ping result, kept on screen after it is announced. */
+    private var lastPing by mutableStateOf("")
     private var session: SessionHandle? = null
     private var ended = false
     private var wifiLock: WifiManager.WifiLock? = null
@@ -105,6 +106,7 @@ class SessionActivity : ComponentActivity(), KeyRouter.Shortcuts {
             Button(onClick = { session?.ping() }, modifier = Modifier.fillMaxWidth()) {
                 Text(getString(R.string.ping))
             }
+            if (lastPing.isNotEmpty()) Text(lastPing)
             Text(lastSpeech)
         }
     }
@@ -166,7 +168,11 @@ class SessionActivity : ComponentActivity(), KeyRouter.Shortcuts {
             } else {
                 getString(R.string.ping_result, milliseconds.roundToInt(), pathName)
             }
-            runOnUiThread { Toast.makeText(this@SessionActivity, message, Toast.LENGTH_SHORT).show() }
+            // Announced rather than shown as a toast, which TalkBack does not always read.
+            runOnUiThread {
+                lastPing = message
+                window.decorView.announceForAccessibility(message)
+            }
         }
 
         override fun onAudio(mode: AudioStreamMode, available: Boolean) {
