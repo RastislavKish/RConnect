@@ -210,8 +210,13 @@ fn encode(
                 }
             }
             AudioMode::Always => {
-                // Keep the stream continuous with silence at the frame rate.
-                while next_silence <= Instant::now() {
+                // Keep the stream continuous with silence at the frame rate, starting
+                // now: a gap that already passed is not made up in a burst.
+                let now = Instant::now();
+                if next_silence + Duration::from_millis(FRAME_MS as u64) < now {
+                    next_silence = now;
+                }
+                while next_silence <= now {
                     next_silence += Duration::from_millis(FRAME_MS as u64);
                     sender.timestamp = sender.timestamp.wrapping_add(FRAME as u32);
                     if let Some(send) = gate.push(silence.clone()) {

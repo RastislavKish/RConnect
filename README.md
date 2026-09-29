@@ -178,5 +178,8 @@ server on the internet; it is used when the two devices cannot reach each other 
 - `rconnect-dev-controller pair <link> | hosts | session` (from `mobile/core`) stands in
   for the phone app. In a session, `audio off|auto|always` switches the audio stream;
   `RUST_LOG=rconnect_core=debug` shows when bursts start and end.
+- The daemon's log: `journalctl --user -u rconnect` (it is a user service). For more
+  detail, add `Environment=RUST_LOG=rconnect=debug` to the unit with
+  `systemctl --user edit rconnect`. The app's log: `adb logcat -s RConnect`.
 - `RCONNECT_RUNTIME_DIR`, `RCONNECT_DATA_DIR`, `RCONNECT_CONFIG_DIR` and
   `RCONNECT_CONTROLLER_DIR` move all state, so tests do not touch a real installation.

@@ -572,7 +572,9 @@ non-speech parts of an audio CAPTCHA. The gate only asks whether anything audibl
    fading sounds don't make it flap.
 
 In Always mode, the encoder makes up silent frames at the frame rate while no data
-arrives, so the stream stays continuous.
+arrives, so the stream stays continuous. They start from the moment they are needed: a
+gap that already passed, e.g. before a switch from Auto, is not made up in a burst,
+which would fill the phone's buffer with a second of silence.
 
 - **Pre-roll:** the last one or two frames are kept and sent first when the gate opens,
   so onsets are not clipped. The gate decides per frame without lookahead, so it adds no
@@ -604,7 +606,9 @@ arrives, so the stream stays continuous.
   lowers it again. A missing packet with later ones waiting is concealed; with nothing
   waiting, up to three frames are concealed, fading out, before playback stops and
   buffers again. Packets whose time has passed are dropped. In Auto it refills at the
-  start of every burst, and the decoder is reset with the encoder.
+  start of every burst, and the decoder is reset with the encoder. Each new stream on
+  the host numbers its packets from zero, so `AudioStarted` resets the jitter buffer; a
+  jump of more than 100 packets does too, in case the datagrams overtake that message.
 - **Clock drift:** the laptop's sound card and the phone's DAC differ by up to about
   100 ppm, so an hour of continuous audio drifts by about 360 ms. The resampler that
   converts 48 kHz to the device's rate runs up to 0.4 % faster or slower, in proportion to

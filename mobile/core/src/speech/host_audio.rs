@@ -79,6 +79,9 @@ struct Inner {
     gain: f32,
     volume: f32,
     ducking: bool,
+    /// Sum of squares and frames mixed since the last level trace.
+    trace_energy: f64,
+    trace_frames: u64,
 }
 
 impl HostAudio {
@@ -103,6 +106,8 @@ impl HostAudio {
                 gain: 0.0,
                 volume: volume_gain(volume),
                 ducking,
+                trace_energy: 0.0,
+                trace_frames: 0,
             }),
         }
     }
@@ -125,13 +130,10 @@ impl HostAudio {
         self.inner.lock().unwrap().push(packet);
     }
 
-    /// Drops everything buffered, e.g. when the stream stops.
+    /// Drops everything buffered, e.g. when the stream stops or starts again. A new
+    /// stream numbers its packets from zero.
     pub fn reset(&self) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.state = State::Idle;
-        inner.packets.clear();
-        inner.newest = None;
-        inner.pcm.clear();
+        self.inner.lock().unwrap().reset();
     }
 
     /// Adds host audio to `out`, `channels` interleaved channels at `device_rate`.
@@ -161,9 +163,32 @@ impl Inner {
         }
     }
 
+    fn reset(&mut self) {
+        self.state = State::Idle;
+        self.packets.clear();
+        self.newest = None;
+        self.next = 0;
+        self.pcm.clear();
+        self.concealed = 0;
+        self.level = 0.0;
+    }
+
     fn push(&mut self, packet: AudioPacket) {
-        let seq = self.extend(packet.seq);
-        if self.state != State::Idle && seq < self.next {
+        let mut seq = self.extend(packet.seq);
+        // Far from everything recent: the host started a new stream, and this packet
+        // overtook the message that says so.
+        if let Some(newest) = self.newest
+            && seq.abs_diff(newest) > 2 * MAX_BUFFERED as u64
+        {
+            tracing::debug!("host audio numbering jumped; starting over");
+            self.reset();
+            seq = self.extend(packet.seq);
+        }
+        let playing = matches!(
+            self.state,
+            State::Playing | State::Buffering { fresh: false }
+        );
+        if playing && seq < self.next {
             return; // Too late: its time has passed.
         }
         self.newest = Some(self.newest.map_or(seq, |newest| newest.max(seq)));
@@ -300,6 +325,7 @@ impl Inner {
             let left = self.previous[0] + (self.current[0] - self.previous[0]) * t;
             let right = self.previous[1] + (self.current[1] - self.previous[1]) * t;
             self.gain += gain_step;
+            self.trace_energy += ((left * left + right * right) * 0.5) as f64;
             match frame {
                 [mono] => *mono += (left + right) * 0.5 * self.gain,
                 [l, r, ..] => {
@@ -311,6 +337,17 @@ impl Inner {
             self.phase += step;
         }
         self.gain = target_gain;
+        self.trace_frames += frames as u64;
+        if self.trace_frames >= device_rate as u64 {
+            tracing::trace!(
+                "host audio: level {:.4}, {:?}, {} packets buffered",
+                (self.trace_energy / self.trace_frames as f64).sqrt(),
+                self.state,
+                self.packets.len()
+            );
+            self.trace_energy = 0.0;
+            self.trace_frames = 0;
+        }
         if self.state == State::Idle && self.pcm.is_empty() {
             // The burst is over; let the next one start from a clean resampler.
             self.previous = [0.0; 2];
@@ -447,6 +484,40 @@ mod tests {
         let inner = audio.inner.lock().unwrap();
         assert_eq!(inner.state, State::Buffering { fresh: false });
         assert_eq!(inner.target, MIN_TARGET + 1);
+    }
+
+    #[test]
+    fn a_restarted_stream_plays_after_reset() {
+        let audio = HostAudio::new(100, false);
+        let mut host = Host::new();
+        host.seq = 3000;
+        for _ in 0..10 {
+            audio.push(&host.packet(false));
+            play(&audio, false);
+        }
+        audio.reset();
+        let mut host = Host::new(); // numbers from zero again
+        for _ in 0..4 {
+            audio.push(&host.packet(false));
+        }
+        assert!(play(&audio, false) > 0.05);
+    }
+
+    #[test]
+    fn a_jump_in_numbering_starts_over() {
+        let audio = HostAudio::new(100, false);
+        let mut host = Host::new();
+        host.seq = 3000;
+        for _ in 0..10 {
+            audio.push(&host.packet(false));
+            play(&audio, false);
+        }
+        // No reset: the new stream's packets arrive before its AudioStarted.
+        let mut host = Host::new();
+        for _ in 0..4 {
+            audio.push(&host.packet(false));
+        }
+        assert!(play(&audio, false) > 0.05);
     }
 
     #[test]
