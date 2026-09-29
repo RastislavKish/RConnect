@@ -49,6 +49,7 @@ pub fn run() -> anyhow::Result<()> {
 async fn run_async() -> anyhow::Result<()> {
     paths::create_runtime_dir()?;
     let config = Config::load()?;
+    audio::restore_after_crash();
     let secret_key = store::load_or_create_secret_key()?;
 
     let transport = QuicTransportConfig::builder()

@@ -541,7 +541,13 @@ per-application audio for Discord the same way. The links are created with
   dev controller, playing the stream on the same computer, would hear itself.
 - The tapped audio comes before the sink's volume: with the sink muted, a tone still
   opened the Auto gate and played on the controller. So the laptop can be muted or turned
-  down while the phone still hears everything. Each stream's own volume still applies
+  down while the phone still hears everything. `local_audio = false` does this for the
+  user: while the stream is on, the default sink is muted with `wpctl set-mute`, which
+  WirePlumber applies to the device's route. Local speech is muted with it, which is
+  what someone who wants audio only on the phone expects. A sink that was muted already
+  is left alone, and only a sink RConnect muted is unmuted. The sink's id and name are
+  written to `muted-sink` in the data directory before muting, so a daemon that crashed
+  is followed by one that unmutes the sink when it starts, if the id still names it. Each stream's own volume still applies
   **(verify)** where PipeWire applies stream volume.
 - Output channels are folded to the capture's FL and FR: left channels to FL, right ones
   to FR, the rest (mono, centre, aux) to both, LFE to neither. PipeWire mixes several

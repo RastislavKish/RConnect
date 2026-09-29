@@ -6,6 +6,7 @@
 
 mod capture;
 mod gate;
+mod mute;
 
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -18,6 +19,8 @@ use rconnect_protocol::messages::{AudioCodec, AudioDirection, AudioFormat, Audio
 use capture::Capture;
 pub use capture::CaptureKind;
 use gate::Gate;
+use mute::LocalMute;
+pub use mute::restore_after_crash;
 
 pub const RATE: u32 = 48_000;
 pub const CHANNELS: usize = 2;
@@ -42,13 +45,18 @@ pub struct AudioStream {
     capture: Option<Capture>,
     modes: mpsc::Sender<AudioMode>,
     encoder: Option<std::thread::JoinHandle<()>>,
+    /// Unmutes the computer once the capture has stopped, if it was muted.
+    _mute: Option<LocalMute>,
 }
 
 impl AudioStream {
+    /// Starts streaming. `mute_locally` keeps the computer silent meanwhile; it needs
+    /// [`CaptureKind::Streams`], whose taps come before the sink's mute.
     pub fn start(
         connection: Connection,
         mode: AudioMode,
         kind: CaptureKind,
+        mute_locally: bool,
     ) -> anyhow::Result<AudioStream> {
         if connection.max_datagram_size().is_none() {
             anyhow::bail!("the controller does not accept datagrams");
@@ -68,6 +76,9 @@ impl AudioStream {
             capture: Some(capture),
             modes,
             encoder: Some(encoder),
+            _mute: (mute_locally && kind == CaptureKind::Streams)
+                .then(LocalMute::mute_default_sink)
+                .flatten(),
         })
     }
 

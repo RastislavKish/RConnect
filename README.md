@@ -78,6 +78,10 @@ local_speech = true
 # the speakers play and turns local speech off while it streams; "off" disables the
 # audio stream.
 audio = "streams"
+# Keep playing audio on this computer while it streams to the phone (default: true).
+# false mutes the computer's output while the stream is on, local speech included, and
+# unmutes it afterwards, even after a crash. It needs audio = "streams".
+local_audio = true
 ```
 
 ## Audio from the computer
@@ -93,7 +97,8 @@ session with CapsLock+F10:
 The settings also have a volume for the computer's audio, and whether to turn it down
 while speech plays. The computer's audio reaches the phone about 50 to 120 ms after it
 plays, more with Bluetooth headphones. Muting the computer does not mute the stream, so
-the computer can stay silent while the phone plays its audio.
+the computer can stay silent while the phone plays its audio; `local_audio = false` does
+that for you whenever the stream is on.
 
 ## Commands
 

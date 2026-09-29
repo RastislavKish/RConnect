@@ -305,7 +305,12 @@ impl Daemon {
         }
         // Connecting to PipeWire takes a moment; don't hold up other sessions' tasks.
         let started = tokio::task::block_in_place(|| {
-            AudioStream::start(connection.clone(), request.mode, kind)
+            AudioStream::start(
+                connection.clone(),
+                request.mode,
+                kind,
+                !self.config.local_audio,
+            )
         });
         match started {
             Ok(stream) => {
