@@ -19,6 +19,18 @@ import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.zIndex
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
@@ -242,25 +254,95 @@ class SettingsActivity : ComponentActivity() {
 
     /**
      * Off, Auto and Always in the user's order, each with a checkbox for whether
-     * CapsLock+F10 cycles through it, and buttons to move it. Sessions start with the
-     * first checked mode.
+     * CapsLock+F10 cycles through it. Sessions start with the first checked mode. Rows are
+     * reordered by dragging after a long press, or with the Move up and Move down
+     * accessibility actions.
      */
     @Composable
     private fun AudioModeChoice() {
+        val haptics = LocalHapticFeedback.current
+        // The mode being dragged and how far it has moved from its current slot, in pixels.
+        var dragged by remember { mutableStateOf<AudioStreamMode?>(null) }
+        var offset by remember { mutableFloatStateOf(0f) }
+        var rowHeight by remember { mutableIntStateOf(1) }
+        // A long press that ends without moving still ends in a tap; it must not toggle.
+        var ignoreTap by remember { mutableStateOf(false) }
+
         Column {
             Text(getString(R.string.audio_mode))
             Text(getString(R.string.audio_mode_order), style = MaterialTheme.typography.bodySmall)
             audioModes.forEachIndexed { index, (mode, on) ->
-                val name = getString(audioModeName(mode))
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                key(mode) {
+                    val name = getString(audioModeName(mode))
+                    val actions = buildList {
+                        if (index > 0) {
+                            add(
+                                CustomAccessibilityAction(getString(R.string.move_up)) {
+                                    moveMode(index, index - 1)
+                                    true
+                                },
+                            )
+                        }
+                        if (index < audioModes.size - 1) {
+                            add(
+                                CustomAccessibilityAction(getString(R.string.move_down)) {
+                                    moveMode(index, index + 1)
+                                    true
+                                },
+                            )
+                        }
+                    }
                     Row(
                         Modifier
-                            .weight(1f)
+                            .fillMaxWidth()
+                            .onSizeChanged { rowHeight = it.height.coerceAtLeast(1) }
+                            .zIndex(if (dragged == mode) 1f else 0f)
+                            .graphicsLayer {
+                                translationY = if (dragged == mode) offset else 0f
+                            }
+                            .pointerInput(mode) {
+                                detectDragGesturesAfterLongPress(
+                                    onDragStart = {
+                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        ignoreTap = true
+                                        dragged = mode
+                                        offset = 0f
+                                    },
+                                    onDrag = { change, amount ->
+                                        change.consume()
+                                        offset += amount.y
+                                        // Swap with a neighbour once the row is past half of it.
+                                        val current = audioModes.indexOfFirst { it.first == mode }
+                                        if (offset > rowHeight / 2 && current < audioModes.size - 1) {
+                                            reorder(current, current + 1)
+                                            offset -= rowHeight
+                                        } else if (offset < -rowHeight / 2 && current > 0) {
+                                            reorder(current, current - 1)
+                                            offset += rowHeight
+                                        }
+                                    },
+                                    onDragEnd = {
+                                        // Cleared after the tap that may follow on this frame.
+                                        window.decorView.post { ignoreTap = false }
+                                        dragged = null
+                                        offset = 0f
+                                        announcePosition(mode)
+                                    },
+                                    onDragCancel = {
+                                        window.decorView.post { ignoreTap = false }
+                                        dragged = null
+                                        offset = 0f
+                                    },
+                                )
+                            }
                             .toggleable(
                                 value = on,
                                 role = Role.Checkbox,
-                                onValueChange = { checked -> setModeOn(index, checked) },
+                                onValueChange = { checked ->
+                                    if (ignoreTap) ignoreTap = false else setModeOn(index, checked)
+                                },
                             )
+                            .semantics { customActions = actions }
                             .padding(vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -273,20 +355,6 @@ class SettingsActivity : ComponentActivity() {
                             )
                         }
                     }
-                    TextButton(
-                        onClick = { moveMode(index, index - 1) },
-                        enabled = index > 0,
-                        modifier = Modifier.semantics {
-                            contentDescription = getString(R.string.move_up_named, name)
-                        },
-                    ) { Text(getString(R.string.move_up)) }
-                    TextButton(
-                        onClick = { moveMode(index, index + 1) },
-                        enabled = index < audioModes.size - 1,
-                        modifier = Modifier.semantics {
-                            contentDescription = getString(R.string.move_down_named, name)
-                        },
-                    ) { Text(getString(R.string.move_down)) }
                 }
             }
         }
@@ -306,18 +374,26 @@ class SettingsActivity : ComponentActivity() {
         saveModes(audioModes.toMutableList().also { it[index] = it[index].first to on })
     }
 
-    /** Moves a mode and announces where it went, since focus stays on the button. */
+    /** Moves a mode with an accessibility action, and says where it went. */
     private fun moveMode(from: Int, to: Int) {
         if (to !in audioModes.indices) return
+        reorder(from, to)
+        announcePosition(audioModes[to].first)
+    }
+
+    private fun reorder(from: Int, to: Int) {
         val modes = audioModes.toMutableList()
         modes.add(to, modes.removeAt(from))
         saveModes(modes)
+    }
+
+    private fun announcePosition(mode: AudioStreamMode) {
         window.decorView.announceForAccessibility(
             getString(
                 R.string.audio_mode_moved,
-                getString(audioModeName(modes[to].first)),
-                to + 1,
-                modes.size,
+                getString(audioModeName(mode)),
+                audioModes.indexOfFirst { it.first == mode } + 1,
+                audioModes.size,
             ),
         )
     }

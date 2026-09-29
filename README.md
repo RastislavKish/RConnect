@@ -93,8 +93,8 @@ Orca's progress beeps. There are three modes:
 - **Auto:** audio streams only while something is playing.
 - **Always:** audio streams all the time, silence included.
 
-In the app's settings, check the modes you want and put them in order with the Up and
-Down buttons. A session starts with the first checked mode, and CapsLock+F10 switches to
+In the app's settings, check the modes you want and put them in order, by dragging a
+mode after a long press or with the Move up and Move down accessibility actions. A session starts with the first checked mode, and CapsLock+F10 switches to
 the next checked one. With only Off and Auto checked, for example, the shortcut toggles
 between those two.
 

@@ -489,7 +489,8 @@ direction (microphone → Opus → a PipeWire virtual source) comes later. Imple
 #### Modes
 
 The user picks the modes on the phone. The settings list all three in the user's order,
-each with a checkbox; a session starts with the first checked mode, and CapsLock+F10
+each with a checkbox, reordered by drag and drop or by the Move up and Move down
+accessibility actions; a session starts with the first checked mode, and CapsLock+F10
 moves to the next checked one, announced like the end of a session. The phone swallows
 the F10, like the F11 of CapsLock+F11. This is the app's own state (`audio_modes` in its
 preferences); the protocol only ever sees the mode requested.
