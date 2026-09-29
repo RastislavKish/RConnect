@@ -24,8 +24,11 @@ use pw::types::ObjectType;
 
 use super::RATE;
 
-/// Name of the capture node, also used to find it in the registry.
-const NODE_NAME: &str = "rconnect-audio";
+/// Name of the capture node, also used to find it in the registry. The process id keeps
+/// two daemons (a test one next to the real one) from taking each other's node.
+fn node_name() -> String {
+    format!("rconnect-audio-{}", std::process::id())
+}
 
 /// Where the audio comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,7 +95,7 @@ fn run(
         *pw::keys::MEDIA_TYPE => "Audio",
         *pw::keys::MEDIA_CATEGORY => "Capture",
         *pw::keys::MEDIA_ROLE => "Accessibility",
-        *pw::keys::NODE_NAME => NODE_NAME,
+        *pw::keys::NODE_NAME => node_name(),
         *pw::keys::NODE_DESCRIPTION => "RConnect audio for the phone",
         // Never keeps a sink running: it only listens while applications play.
         "node.passive" => "true",
@@ -107,7 +110,7 @@ fn run(
             flags |= pw::stream::StreamFlags::AUTOCONNECT;
         }
     }
-    let stream = pw::stream::StreamBox::new(&core, NODE_NAME, props)?;
+    let stream = pw::stream::StreamBox::new(&core, &node_name(), props)?;
     let _listener = stream
         .add_local_listener_with_user_data(pcm)
         .process(|stream, pcm| {
@@ -186,18 +189,67 @@ struct TapState {
     registry: pw::registry::RegistryRc,
     /// The capture node, once it shows up in the registry.
     own_node: Option<u32>,
-    /// Playback streams: bound to read their full properties, which tell whether to tap.
-    streams: HashMap<u32, StreamNode>,
+    /// Playback streams, capture streams and sinks, bound to read their full properties:
+    /// whether a playback stream is tapped depends on the others in its link group.
+    nodes: HashMap<u32, BoundNode>,
     ports: HashMap<u32, PortInfo>,
     /// Our links, by (output port, input port).
     links: HashMap<(u32, u32), Link>,
 }
 
-struct StreamNode {
+struct BoundNode {
     _proxy: Node,
     _listener: NodeListener,
+    class: NodeClass,
     /// Known once the node's properties arrive.
-    tap: Option<bool>,
+    facts: Option<NodeFacts>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeClass {
+    /// `Stream/Output/Audio`: may be tapped.
+    Playback,
+    /// `Stream/Input/Audio`: the capture side of a loopback, among others.
+    Capture,
+    /// `Audio/Sink`.
+    Sink,
+}
+
+impl NodeClass {
+    fn of(media_class: &str) -> Option<NodeClass> {
+        match media_class {
+            "Stream/Output/Audio" => Some(NodeClass::Playback),
+            "Stream/Input/Audio" => Some(NodeClass::Capture),
+            "Audio/Sink" => Some(NodeClass::Sink),
+            _ => None,
+        }
+    }
+}
+
+/// What a node's full properties say.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NodeFacts {
+    /// For playback streams: an application's own audio, apart from link groups.
+    own_audio: bool,
+    /// `node.link-group`, shared by the two sides of a loopback or filter.
+    link_group: Option<String>,
+    /// For capture streams: records what a sink plays.
+    captures_playback: bool,
+}
+
+impl NodeFacts {
+    fn of(props: &DictRef) -> NodeFacts {
+        NodeFacts {
+            own_audio: !is_speech_dispatcher(props)
+                && !is_rconnect(props)
+                && props.get("stream.monitor") != Some("true"),
+            link_group: props.get("node.link-group").map(str::to_owned),
+            captures_playback: props.get(*pw::keys::STREAM_CAPTURE_SINK) == Some("true")
+                || props
+                    .get("target.object")
+                    .is_some_and(|target| target.ends_with(".monitor")),
+        }
+    }
 }
 
 struct PortInfo {
@@ -213,7 +265,7 @@ impl Tap {
             core: core.clone(),
             registry: registry.clone(),
             own_node: None,
-            streams: HashMap::new(),
+            nodes: HashMap::new(),
             ports: HashMap::new(),
             links: HashMap::new(),
         }));
@@ -250,17 +302,18 @@ impl TapState {
         match global.type_ {
             ObjectType::Node => {
                 let name = props.get(*pw::keys::NODE_NAME).unwrap_or_default();
-                if name == NODE_NAME {
+                if name == node_name() {
                     this.borrow_mut().own_node = Some(global.id);
                     this.borrow_mut().reconcile();
                     return;
                 }
-                if props.get(*pw::keys::MEDIA_CLASS) != Some("Stream/Output/Audio")
-                    || is_speech_dispatcher(props)
-                {
+                let Some(class) = props.get(*pw::keys::MEDIA_CLASS).and_then(NodeClass::of) else {
+                    return;
+                };
+                if class == NodeClass::Playback && is_speech_dispatcher(props) {
                     return;
                 }
-                // Loopbacks and filters show only in the node's full properties.
+                // Link groups show only in the node's full properties.
                 let proxy: Node = match this.borrow().registry.bind(global) {
                     Ok(proxy) => proxy,
                     Err(e) => {
@@ -281,24 +334,28 @@ impl TapState {
                             let Some(state) = state.upgrade() else {
                                 return;
                             };
-                            let tap = info.props().is_some_and(should_tap);
+                            let Some(props) = info.props() else {
+                                return;
+                            };
+                            let facts = NodeFacts::of(props);
                             let mut state = state.borrow_mut();
-                            if let Some(stream) = state.streams.get_mut(&id)
-                                && stream.tap != Some(tap)
+                            if let Some(node) = state.nodes.get_mut(&id)
+                                && node.facts.as_ref() != Some(&facts)
                             {
-                                tracing::debug!("stream {id}: tap {tap}");
-                                stream.tap = Some(tap);
+                                tracing::debug!("node {id}: {:?} {facts:?}", node.class);
+                                node.facts = Some(facts);
                                 state.reconcile();
                             }
                         }
                     })
                     .register();
-                this.borrow_mut().streams.insert(
+                this.borrow_mut().nodes.insert(
                     id,
-                    StreamNode {
+                    BoundNode {
                         _proxy: proxy,
                         _listener: listener,
-                        tap: None,
+                        class,
+                        facts: None,
                     },
                 );
             }
@@ -323,7 +380,7 @@ impl TapState {
     }
 
     fn on_global_remove(&mut self, id: u32) {
-        self.streams.remove(&id);
+        self.nodes.remove(&id);
         if self.own_node == Some(id) {
             self.own_node = None;
         }
@@ -333,6 +390,32 @@ impl TapState {
                 .retain(|&(output, input), _| output != id && input != id);
         }
         self.reconcile();
+    }
+
+    /// Whether a node is a playback stream carrying new audio. Loopbacks and filters that
+    /// pass on playback, whose link group has a sink or captures a sink's monitor, repeat
+    /// audio the applications behind them already produced, so they are not tapped. A
+    /// loopback from a microphone is new audio, and is.
+    fn is_tapped(&self, id: u32) -> bool {
+        let Some(node) = self.nodes.get(&id) else {
+            return false;
+        };
+        let Some(facts) = &node.facts else {
+            return false;
+        };
+        if node.class != NodeClass::Playback || !facts.own_audio {
+            return false;
+        }
+        let Some(group) = &facts.link_group else {
+            return true;
+        };
+        !self.nodes.values().any(|other| {
+            other.facts.as_ref().is_some_and(|other_facts| {
+                other_facts.link_group.as_ref() == Some(group)
+                    && (other.class == NodeClass::Sink
+                        || (other.class == NodeClass::Capture && other_facts.captures_playback))
+            })
+        })
     }
 
     /// Creates the links that should exist and drops those that should not.
@@ -348,12 +431,7 @@ impl TapState {
             .collect();
         let mut wanted = HashSet::new();
         for (&output, port) in &self.ports {
-            let tapped = port.output
-                && self
-                    .streams
-                    .get(&port.node)
-                    .is_some_and(|stream| stream.tap == Some(true));
-            if !tapped {
+            if !port.output || !self.is_tapped(port.node) {
                 continue;
             }
             for &(input, channel) in &inputs {
@@ -409,16 +487,6 @@ fn is_rconnect(props: &DictRef) -> bool {
     .iter()
     .filter_map(|key| props.get(key))
     .any(|value| value.contains("rconnect"))
-}
-
-/// Whether a playback stream is an application's own audio. Loopbacks and filters pass on
-/// audio that the applications behind them already produced; tapping them would repeat it.
-fn should_tap(props: &DictRef) -> bool {
-    !is_speech_dispatcher(props)
-        && !is_rconnect(props)
-        && props.get("node.link-group").is_none()
-        && props.get("node.virtual") != Some("true")
-        && props.get("stream.monitor") != Some("true")
 }
 
 /// Whether an output channel is mixed into one of the capture's two input channels.

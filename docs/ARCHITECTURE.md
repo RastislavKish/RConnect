@@ -535,14 +535,19 @@ per-application audio for Discord the same way. The links are created with
   repeated on the phone. It also keeps local speech from opening the Auto gate.
   speech-dispatcher's streams carry no `application.name`; they are recognised by their
   `node.name`, `speech-dispatcher-<module>`.
-- **Loopback and filter streams are not tapped** (EasyEffects, `module-loopback`, filter
-  chains). They carry audio that the applications behind them already produced, so
-  tapping them would duplicate it. `pw-loopback`'s playback stream has `node.link-group`
-  and `node.virtual = true`; streams with either, or with `stream.monitor = true`, are
-  skipped. These properties are not in the registry's global properties, so each
-  playback stream is bound to read its full ones; only info events that change the
-  properties count, because state changes arrive with empty ones. **(verify)** with
-  EasyEffects.
+- **Loopbacks and filters that pass on playback are not tapped** (EasyEffects,
+  `module-loopback` sinks, filter chains, monitor loopbacks). They carry audio that the
+  applications behind them already produced, so tapping them would duplicate it. Their
+  two sides share a `node.link-group`; a playback stream in a link group is skipped when
+  the group also has an `Audio/Sink`, or a capture stream that records a sink
+  (`stream.capture.sink = true`, or a `target.object` ending in `.monitor`). A loopback
+  from a microphone, such as `pw-loopback` for hearing oneself, is new audio and is
+  tapped like any application: its output is marked `node.virtual` like all loopback
+  outputs, so that property alone does not decide. Link groups are not in the registry's
+  global properties, so playback streams, capture streams and sinks are bound to read
+  their full ones; only info events that change the properties count, because state
+  changes arrive with empty ones. Tested with `pw-loopback` in all three forms
+  **(verify)** with EasyEffects.
 - RConnect's own processes are not tapped either (any of `node.name`,
   `application.name` or `application.process.binary` containing `rconnect`). Otherwise the
   dev controller, playing the stream on the same computer, would hear itself.
@@ -559,6 +564,8 @@ per-application audio for Discord the same way. The links are created with
 - Output channels are folded to the capture's FL and FR: left channels to FL, right ones
   to FR, the rest (mono, centre, aux) to both, LFE to neither. PipeWire mixes several
   links into one input port.
+- The capture node is named `rconnect-audio-<pid>`, so two daemons (a test one next to
+  the real one) never take each other's node for their own.
 - The node asks for a latency of about 10 ms (`node.latency`). The quantum is shared by
   the whole graph, so asking for less makes all of the host's audio wake up more often.
 - Applications that open ALSA hardware directly bypass PipeWire and are not captured.
