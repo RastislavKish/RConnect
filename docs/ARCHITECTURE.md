@@ -429,7 +429,7 @@ EndSession { reason: EndReason }        // user shortcut, desktop shutdown, repl
 AudioRequest { direction: AudioDir, mode: AudioMode }   // AudioMode = Auto | Always; also switches modes
 AudioStarted { direction: AudioDir, mode: AudioMode, codec: Codec, sample_rate: u32, channels: u8, frame_ms: u8 }
 AudioStop                               // back to Off
-MicRequest(MicMode)                     // phone → desktop; MicMode = Off | Muted | Live | Voice
+MicRequest(MicMode)                     // phone → desktop; MicMode = Off | Muted | Unmuted | Vad
 MicState(MicMode)                       // desktop's answer: the mode now in effect
 MicUnavailable                          // desktop's answer when it cannot create the microphone
 Ping(u32)                               // phone measures the round trip time
@@ -682,30 +682,36 @@ hears themselves. That is the user's choice, as it is with any microphone.
   runs, as without the feature.
 - **Muted:** the desktop has a virtual microphone that plays silence. The phone's
   microphone is closed, so Android's privacy indicator is off.
-- **Live:** the phone captures and sends continuously.
-- **Voice:** the phone captures, but sends only while someone speaks (Earshot, below).
-  The desktop plays silence in between.
+- **Unmuted:** the phone captures and sends continuously.
+- **VAD:** the phone captures, but sends only while someone speaks (voice activity
+  detection with Earshot, below). The desktop plays silence in between.
 
-The desktop cannot tell Live from Voice by the packets; it hears the mode in
+The names say what each mode does, which matters more here than short announcements.
+The desktop cannot tell Unmuted from VAD by the packets; it hears the mode in
 `MicRequest` for its log and for `MicState`.
+
+**Choosing modes** works like the audio stream's (§5.6). The settings list all four in
+the user's order, each with a checkbox, reordered by drag and drop or by the Move up and
+Move down accessibility actions. A session starts in the first checked mode, and
+**CapsLock+F9** moves to the next checked one, announced like the other shortcuts. The
+default list is Off, Muted, Unmuted checked and VAD unchecked, so a session starts
+without a microphone, the first press creates it muted, and after that the shortcut
+toggles between Muted and Unmuted. With only Muted and Unmuted checked, and Muted first,
+the microphone exists from the start and the shortcut is a plain mute toggle.
+
+Muting acts at once: the phone stops sending, and the desktop drops whatever is buffered
+as soon as it hears `Muted`, rather than playing it out.
 
 **The virtual microphone does not disappear on its own.** If it vanished during a call,
 the call application would quietly switch to the laptop's own microphone. So once it
-exists, it stays until the session ends:
+exists in a session, CapsLock+F9 skips Off, even when Off is checked. Only with the
+opt-in setting "Allow removing the computer's microphone during a session", whose
+description says what happens to a running call, does the shortcut stop at Off and remove
+it. Off still works as the first entry: the state a session starts in.
 
-- **CapsLock+F9** toggles between Muted and the live mode the user chose in the settings
-  (Live or Voice), announced like the other shortcuts. This is the key action in a call,
-  so it is a single key and acts at once: the phone stops sending, and the desktop drops
-  whatever is buffered as soon as it hears `Muted`, rather than playing it out.
-- **Off during a session** needs an explicit opt-in in the settings ("Allow removing the
-  computer's microphone during a session"), whose description says what happens to a
-  running call. Only then does **CapsLock+Shift+F9** remove it. Without the opt-in, the
-  shortcut says that the microphone stays and where to change that.
-- **Mode at session start**, in the settings: Off (default), Muted, or the live mode.
-  From Off, CapsLock+F9 creates the microphone, unmuted.
-- **At session end** the microphone is removed; this cannot be avoided, since the
-  desktop no longer has a phone. A call still running falls back to another microphone.
-  Countermeasures are listed in §7.
+At session end the microphone is removed; this cannot be avoided, since the desktop no
+longer has a phone. A call still running falls back to another microphone.
+Countermeasures are listed in §7.
 
 #### Desktop: the virtual microphone
 
@@ -717,7 +723,7 @@ exists, it stays until the session ends:
   a user who chose it as the default once gets it back whenever it appears, and the
   previous default when it goes **(verify)**.
 - PipeWire pulls audio from it; its process callback takes samples from the jitter
-  buffer, and plays silence while the buffer is empty, while muted and between Voice
+  buffer, and plays silence while the buffer is empty, while muted and between VAD
   bursts. Clock drift is corrected the same way as on the phone (§5.6), because the
   graph runs on the desktop's sound card clock.
 - `node.latency` asks for about 10 ms, as for the capture in §5.6.
@@ -736,14 +742,14 @@ exists, it stays until the session ends:
   switch the headset from A2DP to its call profile, with narrowband mono audio for
   everything, speech included, and a gap while it switches **(verify)** that an explicit
   built-in input keeps A2DP.
-- The input is open only in Live and Voice. Opening it takes roughly 50–200 ms on
+- The input is open only in Unmuted and VAD. Opening it takes roughly 50–200 ms on
   Android **(verify)**, so the first moment after unmuting may be lost; the capture
   starts right after the shortcut, before anything else.
 - The audio callback only copies samples into a ring buffer. Resampling, Earshot and
   Opus run on an encoder thread of their own, never on the thread that sends keys, and
   never in the callback.
-- **Permission:** `RECORD_AUDIO` is asked for when the user first picks a mode other
-  than Off. If it is denied, the phone behaves as Muted: the desktop's microphone
+- **Permission:** `RECORD_AUDIO` is asked for when the user first checks Unmuted or
+  VAD. If it is denied, the phone behaves as Muted: the desktop's microphone
   exists and stays silent, and the shortcut says why.
 - **Silenced by the system:** Android 12's microphone toggle delivers silence without an
   error, which needs no handling. Android 10+ silences an app while another one (a phone
@@ -753,7 +759,7 @@ exists, it stays until the session ends:
   foreground; a future "phone in pocket" mode needs a foreground service of type
   `microphone`, which Android 14 lets start only while the app is visible.
 
-#### Voice: Earshot
+#### VAD: Earshot
 
 Voice activity detection is the right tool here, unlike for §5.6's gate, because this
 time speech is what should pass. Earshot is pure Rust, about 95 KB with its model, MIT or
@@ -767,9 +773,9 @@ Apache 2.0, and very fast (about 3,600 times real time).
   onsets are not cut. **Hold** of 400 ms after the last speech, so pauses between words
   and soft endings pass. The last frame of a burst carries the end-of-burst flag, as in
   §5.6, and the encoder is reset at the start of each burst.
-- What it gains: less traffic and battery than Live, and no room noise between
+- What it gains: less traffic and battery than Unmuted, and no room noise between
   sentences. Call applications suppress noise themselves, so it is a convenience, built
-  after Live works.
+  after Unmuted works.
 
 #### Wire format
 
@@ -808,7 +814,7 @@ frames save about 10 ms at twice the packet rate.
 #### Privacy
 
 - Android's indicator shows whenever the phone's microphone is open, which is only in
-  Live and Voice. Every mode change is announced.
+  Unmuted and VAD. Every mode change is announced.
 - Audio goes only to the paired desktop, over the session's authenticated connection.
 - The desktop plays nothing into the microphone that did not come from the phone.
 
