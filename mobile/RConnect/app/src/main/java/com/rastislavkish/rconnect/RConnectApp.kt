@@ -71,21 +71,34 @@ class AppSettings(context: Context) {
         get() = preferences.getBoolean("keep_alive", false)
         set(value) = preferences.edit().putBoolean("keep_alive", value).apply()
 
-    /** When the computer streams its audio to the phone, at the start of a session. */
-    var audioMode: AudioStreamMode
-        get() = when (preferences.getString("audio_mode", null)) {
-            "auto" -> AudioStreamMode.AUTO
-            "always" -> AudioStreamMode.ALWAYS
-            else -> AudioStreamMode.OFF
+    /**
+     * All three audio modes in the user's order, each with whether CapsLock+F10 cycles
+     * through it. Stored as e.g. `auto,off,-always`, where `-` marks a mode left out.
+     */
+    var audioModes: List<Pair<AudioStreamMode, Boolean>>
+        get() {
+            val stored = preferences.getString("audio_modes", null)
+                ?.split(',')
+                ?.mapNotNull { item ->
+                    val mode = modeFromKey(item.removePrefix("-")) ?: return@mapNotNull null
+                    mode to !item.startsWith("-")
+                }
+                ?.distinctBy { it.first }
+            if (stored != null && stored.size == ALL_MODES.size && stored.any { it.second }) {
+                return stored
+            }
+            // Before the order existed, a single mode was chosen; it goes first.
+            val old = modeFromKey(preferences.getString("audio_mode", null) ?: "off")
+                ?: AudioStreamMode.OFF
+            return (listOf(old) + (ALL_MODES - old)).map { it to true }
         }
         set(value) = preferences.edit().putString(
-            "audio_mode",
-            when (value) {
-                AudioStreamMode.OFF -> "off"
-                AudioStreamMode.AUTO -> "auto"
-                AudioStreamMode.ALWAYS -> "always"
-            },
+            "audio_modes",
+            value.joinToString(",") { (mode, on) -> (if (on) "" else "-") + modeKey(mode) },
         ).apply()
+
+    /** The modes CapsLock+F10 cycles through; a session starts with the first. */
+    fun audioCycle(): List<AudioStreamMode> = audioModes.filter { it.second }.map { it.first }
 
     /** Volume of the computer's audio, 0 to 100. */
     var audioVolume: Int
@@ -97,7 +110,19 @@ class AppSettings(context: Context) {
         get() = preferences.getBoolean("audio_ducking", true)
         set(value) = preferences.edit().putBoolean("audio_ducking", value).apply()
 
-    fun audioSettings() = AudioSettings(audioMode, audioVolume.toUByte(), audioDucking)
+    fun audioSettings() = AudioSettings(audioCycle().first(), audioVolume.toUByte(), audioDucking)
+
+    private companion object {
+        val ALL_MODES = listOf(AudioStreamMode.OFF, AudioStreamMode.AUTO, AudioStreamMode.ALWAYS)
+
+        fun modeKey(mode: AudioStreamMode) = when (mode) {
+            AudioStreamMode.OFF -> "off"
+            AudioStreamMode.AUTO -> "auto"
+            AudioStreamMode.ALWAYS -> "always"
+        }
+
+        fun modeFromKey(key: String) = ALL_MODES.firstOrNull { modeKey(it) == key }
+    }
 
     /**
      * The speech settings. Until the user picks a voice, the one matching the phone's

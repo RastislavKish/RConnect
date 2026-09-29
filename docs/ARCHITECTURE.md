@@ -488,9 +488,11 @@ direction (microphone → Opus → a PipeWire virtual source) comes later. Imple
 
 #### Modes
 
-The user picks the mode on the phone: in the settings, and during a session with
-CapsLock+F10, which cycles Off, Auto and Always and is announced like the end of a
-session. The phone swallows the F10, like the F11 of CapsLock+F11.
+The user picks the modes on the phone. The settings list all three in the user's order,
+each with a checkbox; a session starts with the first checked mode, and CapsLock+F10
+moves to the next checked one, announced like the end of a session. The phone swallows
+the F10, like the F11 of CapsLock+F11. This is the app's own state (`audio_modes` in its
+preferences); the protocol only ever sees the mode requested.
 
 - **Off** (default): no PipeWire connection, no capture thread, no datagrams. The phone's
   audio callback only checks that there is no host audio. Keys and speech work exactly as

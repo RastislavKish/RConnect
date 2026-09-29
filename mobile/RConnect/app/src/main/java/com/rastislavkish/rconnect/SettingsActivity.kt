@@ -20,6 +20,7 @@ import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
@@ -69,7 +70,7 @@ class SettingsActivity : ComponentActivity() {
     private var voices by mutableStateOf<List<VoiceOption>>(emptyList())
     private var variants by mutableStateOf<List<VoiceOption>>(emptyList())
     private var keepAlive by mutableStateOf(false)
-    private var audioMode by mutableStateOf(AudioStreamMode.OFF)
+    private var audioModes by mutableStateOf<List<Pair<AudioStreamMode, Boolean>>>(emptyList())
     private var audioVolume by mutableStateOf(100)
     private var audioDucking by mutableStateOf(true)
     private var preview: SpeechPreview? = null
@@ -78,7 +79,7 @@ class SettingsActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         keepAlive = app.settings.keepAlive
-        audioMode = app.settings.audioMode
+        audioModes = app.settings.audioModes
         audioVolume = app.settings.audioVolume
         audioDucking = app.settings.audioDucking
         lifecycleScope.launch {
@@ -239,41 +240,91 @@ class SettingsActivity : ComponentActivity() {
         }
     }
 
-    /** Off, Auto and Always as radio buttons, each with what it does. */
+    /**
+     * Off, Auto and Always in the user's order, each with a checkbox for whether
+     * CapsLock+F10 cycles through it, and buttons to move it. Sessions start with the
+     * first checked mode.
+     */
     @Composable
     private fun AudioModeChoice() {
-        Column(Modifier.selectableGroup()) {
+        Column {
             Text(getString(R.string.audio_mode))
-            for (
-                (mode, description) in listOf(
-                    AudioStreamMode.OFF to R.string.audio_mode_off_description,
-                    AudioStreamMode.AUTO to R.string.audio_mode_auto_description,
-                    AudioStreamMode.ALWAYS to R.string.audio_mode_always_description,
-                )
-            ) {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .selectable(
-                            selected = mode == audioMode,
-                            role = Role.RadioButton,
-                            onClick = {
-                                audioMode = mode
-                                app.settings.audioMode = mode
-                            },
-                        )
-                        .padding(vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    RadioButton(selected = mode == audioMode, onClick = null)
-                    Column(Modifier.padding(start = 8.dp)) {
-                        Text(getString(audioModeName(mode)))
-                        Text(getString(description), style = MaterialTheme.typography.bodySmall)
+            Text(getString(R.string.audio_mode_order), style = MaterialTheme.typography.bodySmall)
+            audioModes.forEachIndexed { index, (mode, on) ->
+                val name = getString(audioModeName(mode))
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        Modifier
+                            .weight(1f)
+                            .toggleable(
+                                value = on,
+                                role = Role.Checkbox,
+                                onValueChange = { checked -> setModeOn(index, checked) },
+                            )
+                            .padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(checked = on, onCheckedChange = null)
+                        Column(Modifier.padding(start = 8.dp)) {
+                            Text(name)
+                            Text(
+                                getString(audioModeDescription(mode)),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
                     }
+                    TextButton(
+                        onClick = { moveMode(index, index - 1) },
+                        enabled = index > 0,
+                        modifier = Modifier.semantics {
+                            contentDescription = getString(R.string.move_up_named, name)
+                        },
+                    ) { Text(getString(R.string.move_up)) }
+                    TextButton(
+                        onClick = { moveMode(index, index + 1) },
+                        enabled = index < audioModes.size - 1,
+                        modifier = Modifier.semantics {
+                            contentDescription = getString(R.string.move_down_named, name)
+                        },
+                    ) { Text(getString(R.string.move_down)) }
                 }
             }
-            Text(getString(R.string.audio_mode_shortcut), style = MaterialTheme.typography.bodySmall)
         }
+    }
+
+    private fun audioModeDescription(mode: AudioStreamMode) = when (mode) {
+        AudioStreamMode.OFF -> R.string.audio_mode_off_description
+        AudioStreamMode.AUTO -> R.string.audio_mode_auto_description
+        AudioStreamMode.ALWAYS -> R.string.audio_mode_always_description
+    }
+
+    private fun setModeOn(index: Int, on: Boolean) {
+        if (!on && audioModes.count { it.second } == 1) {
+            window.decorView.announceForAccessibility(getString(R.string.audio_mode_keep_one))
+            return
+        }
+        saveModes(audioModes.toMutableList().also { it[index] = it[index].first to on })
+    }
+
+    /** Moves a mode and announces where it went, since focus stays on the button. */
+    private fun moveMode(from: Int, to: Int) {
+        if (to !in audioModes.indices) return
+        val modes = audioModes.toMutableList()
+        modes.add(to, modes.removeAt(from))
+        saveModes(modes)
+        window.decorView.announceForAccessibility(
+            getString(
+                R.string.audio_mode_moved,
+                getString(audioModeName(modes[to].first)),
+                to + 1,
+                modes.size,
+            ),
+        )
+    }
+
+    private fun saveModes(modes: List<Pair<AudioStreamMode, Boolean>>) {
+        audioModes = modes
+        app.settings.audioModes = modes
     }
 
     @Composable

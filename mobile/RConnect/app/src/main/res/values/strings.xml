@@ -18,7 +18,13 @@
     <string name="audio_mode_auto_description">Stream audio from the computer only while something is playing.</string>
     <string name="audio_mode_always">Always</string>
     <string name="audio_mode_always_description">Stream audio from the computer all the time.</string>
-    <string name="audio_mode_shortcut">During a session, CapsLock+F10 switches between these.</string>
+    <string name="audio_mode_order">During a session, CapsLock+F10 switches between the checked modes in this order. A session starts with the first checked mode.</string>
+    <string name="audio_mode_keep_one">At least one mode must stay checked.</string>
+    <string name="audio_mode_moved">%1$s is now number %2$d of %3$d.</string>
+    <string name="move_up">Up</string>
+    <string name="move_down">Down</string>
+    <string name="move_up_named">Move %1$s up</string>
+    <string name="move_down_named">Move %1$s down</string>
     <string name="audio_volume">Computer audio volume</string>
     <string name="audio_ducking">Turn computer audio down while speech plays</string>
     <string name="audio_mode_now">Computer audio: %1$s</string>

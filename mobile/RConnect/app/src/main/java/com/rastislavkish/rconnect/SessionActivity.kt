@@ -41,7 +41,8 @@ import uniffi.rconnect_ffi.SessionListener
 /**
  * A running session: keys go to the computer, its screen reader speaks through the
  * phone. It ends with CapsLock+F11, the End button, or by leaving this screen.
- * CapsLock+F10 switches the computer's audio stream between off, auto and always.
+ * CapsLock+F10 switches the computer's audio stream through the modes chosen in the
+ * settings, in their order.
  */
 class SessionActivity : ComponentActivity(), KeyRouter.Shortcuts {
 
@@ -53,6 +54,8 @@ class SessionActivity : ComponentActivity(), KeyRouter.Shortcuts {
     private var wifiLock: WifiManager.WifiLock? = null
     /** The audio mode last asked for; the computer confirms it through `onAudio`. */
     private var audioMode = AudioStreamMode.OFF
+    /** The modes CapsLock+F10 cycles through, in the user's order. */
+    private var audioCycle = listOf(AudioStreamMode.OFF)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -98,6 +101,7 @@ class SessionActivity : ComponentActivity(), KeyRouter.Shortcuts {
                 val speechData = app.speechData.await()
                 val voice = withContext(Dispatchers.IO) { app.settings.voiceSettings(speechData) }
                 val audio = app.settings.audioSettings()
+                audioCycle = app.settings.audioCycle()
                 audioMode = audio.mode
                 val handle = core.startSession(
                     hostId,
@@ -205,11 +209,8 @@ class SessionActivity : ComponentActivity(), KeyRouter.Shortcuts {
     override fun endSession() = end()
 
     override fun cycleAudioMode() {
-        val next = when (audioMode) {
-            AudioStreamMode.OFF -> AudioStreamMode.AUTO
-            AudioStreamMode.AUTO -> AudioStreamMode.ALWAYS
-            AudioStreamMode.ALWAYS -> AudioStreamMode.OFF
-        }
+        // A mode outside the cycle (e.g. after the computer refused) continues at the start.
+        val next = audioCycle[(audioCycle.indexOf(audioMode) + 1) % audioCycle.size]
         audioMode = next
         session?.setAudioMode(next)
     }

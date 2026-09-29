@@ -87,12 +87,16 @@ local_audio = true
 ## Audio from the computer
 
 Besides speech, the phone can play the computer's own audio: videos, audio CAPTCHAs,
-Orca's progress beeps. Choose the mode in the app's settings, or switch it during a
-session with CapsLock+F10:
+Orca's progress beeps. There are three modes:
 
 - **Off** (default): no audio from the computer, and no cost at all.
 - **Auto:** audio streams only while something is playing.
 - **Always:** audio streams all the time, silence included.
+
+In the app's settings, check the modes you want and put them in order with the Up and
+Down buttons. A session starts with the first checked mode, and CapsLock+F10 switches to
+the next checked one. With only Off and Auto checked, for example, the shortcut toggles
+between those two.
 
 The settings also have a volume for the computer's audio, and whether to turn it down
 while speech plays. The computer's audio reaches the phone about 50 to 120 ms after it
