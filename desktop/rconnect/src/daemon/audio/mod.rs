@@ -6,6 +6,7 @@
 
 mod capture;
 mod gate;
+mod mic;
 mod mute;
 
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -19,6 +20,7 @@ use rconnect_protocol::messages::{AudioCodec, AudioDirection, AudioFormat, Audio
 use capture::Capture;
 pub use capture::CaptureKind;
 use gate::Gate;
+pub use mic::VirtualMic;
 use mute::LocalMute;
 pub use mute::restore_after_crash;
 

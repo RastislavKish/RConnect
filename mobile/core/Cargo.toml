@@ -6,8 +6,10 @@ description = "Controller side of RConnect: the Rust core of the Android app"
 
 [dependencies]
 anyhow = "1.0.104"
+earshot = "1.2.2"
 iroh = "1.2.0"
 iroh-mdns-address-lookup = "0.5.0"
+rconnect-audio = { version = "0.1.0", path = "../../audio" }
 rconnect-opus = { version = "0.1.0", path = "../../opus" }
 rconnect-protocol = { version = "0.1.0", path = "../../protocol" }
 serde = { version = "1.0.229", features = ["derive"] }

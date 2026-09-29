@@ -15,6 +15,8 @@ object KeyRouter {
         fun endSession()
         /** CapsLock+F10. */
         fun cycleAudioMode()
+        /** CapsLock+F9. */
+        fun cycleMicMode()
     }
 
     private var session: SessionHandle? = null
@@ -57,6 +59,10 @@ object KeyRouter {
                 }
                 if (code == KeyCodes.KEY_F10 && KeyCodes.KEY_CAPSLOCK in pressed) {
                     shortcuts?.cycleAudioMode()
+                    return true
+                }
+                if (code == KeyCodes.KEY_F9 && KeyCodes.KEY_CAPSLOCK in pressed) {
+                    shortcuts?.cycleMicMode()
                     return true
                 }
                 pressed += code

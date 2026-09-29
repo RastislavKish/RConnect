@@ -1,5 +1,5 @@
 //! Audio output: one stream, kept open for the whole session, pulling from [`Playback`]
-//! and mixing in [`HostAudio`].
+//! and mixing in [`StreamPlayer`].
 //!
 //! On Android this is AAudio in low latency mode with the accessibility usage, so speech
 //! follows the accessibility volume like TalkBack. The stream runs at the device's own
@@ -9,8 +9,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use super::host_audio::HostAudio;
 use super::playback::{Playback, Resampler};
+use rconnect_audio::StreamPlayer;
 
 pub use platform::Output;
 
@@ -18,14 +18,14 @@ pub use platform::Output;
 struct Mixer {
     speech_rate: u32,
     playback: Arc<Mutex<Playback>>,
-    host: Arc<HostAudio>,
+    host: Arc<StreamPlayer>,
     /// Created for the device's rate and channels, recreated if they change.
     resampler: Option<(u32, usize, Resampler)>,
     buffer: Vec<f32>,
 }
 
 impl Mixer {
-    fn new(speech_rate: u32, playback: Arc<Mutex<Playback>>, host: Arc<HostAudio>) -> Mixer {
+    fn new(speech_rate: u32, playback: Arc<Mutex<Playback>>, host: Arc<StreamPlayer>) -> Mixer {
         Mixer {
             speech_rate,
             playback,
@@ -84,7 +84,7 @@ mod platform {
         pub fn open(
             sample_rate: u32,
             playback: Arc<Mutex<Playback>>,
-            host: Arc<HostAudio>,
+            host: Arc<StreamPlayer>,
         ) -> anyhow::Result<Output> {
             let broken = Arc::new(AtomicBool::new(false));
             let broken_flag = broken.clone();
@@ -157,7 +157,7 @@ mod platform {
         pub fn open(
             sample_rate: u32,
             playback: Arc<Mutex<Playback>>,
-            host: Arc<HostAudio>,
+            host: Arc<StreamPlayer>,
         ) -> anyhow::Result<Output> {
             let device = cpal::default_host()
                 .default_output_device()

@@ -13,6 +13,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import uniffi.rconnect_ffi.AudioSettings
 import uniffi.rconnect_ffi.AudioStreamMode
+import uniffi.rconnect_ffi.MicStreamMode
 import uniffi.rconnect_ffi.RConnect
 import uniffi.rconnect_ffi.VoiceSettings
 import uniffi.rconnect_ffi.defaultVoiceSettings
@@ -55,6 +56,14 @@ class RConnectApp : Application() {
 val Context.app: RConnectApp
     get() = applicationContext as RConnectApp
 
+/** Name of a microphone mode, as shown and announced. */
+fun micModeName(mode: MicStreamMode): Int = when (mode) {
+    MicStreamMode.OFF -> R.string.mic_mode_off
+    MicStreamMode.MUTED -> R.string.mic_mode_muted
+    MicStreamMode.UNMUTED -> R.string.mic_mode_unmuted
+    MicStreamMode.VAD -> R.string.mic_mode_vad
+}
+
 /** Name of an audio stream mode, as shown and announced. */
 fun audioModeName(mode: AudioStreamMode): Int = when (mode) {
     AudioStreamMode.OFF -> R.string.audio_mode_off
@@ -73,29 +82,16 @@ class AppSettings(context: Context) {
 
     /**
      * All three audio modes in the user's order, each with whether CapsLock+F10 cycles
-     * through it. Stored as e.g. `auto,off,-always`, where `-` marks a mode left out.
+     * through it.
      */
     var audioModes: List<Pair<AudioStreamMode, Boolean>>
-        get() {
-            val stored = preferences.getString("audio_modes", null)
-                ?.split(',')
-                ?.mapNotNull { item ->
-                    val mode = modeFromKey(item.removePrefix("-")) ?: return@mapNotNull null
-                    mode to !item.startsWith("-")
-                }
-                ?.distinctBy { it.first }
-            if (stored != null && stored.size == ALL_MODES.size && stored.any { it.second }) {
-                return stored
-            }
+        get() = readModes("audio_modes", ALL_MODES, ::modeKey) ?: run {
             // Before the order existed, a single mode was chosen; it goes first.
             val old = modeFromKey(preferences.getString("audio_mode", null) ?: "off")
                 ?: AudioStreamMode.OFF
-            return (listOf(old) + (ALL_MODES - old)).map { it to true }
+            (listOf(old) + (ALL_MODES - old)).map { it to true }
         }
-        set(value) = preferences.edit().putString(
-            "audio_modes",
-            value.joinToString(",") { (mode, on) -> (if (on) "" else "-") + modeKey(mode) },
-        ).apply()
+        set(value) = writeModes("audio_modes", value, ::modeKey)
 
     /** The modes CapsLock+F10 cycles through; a session starts with the first. */
     fun audioCycle(): List<AudioStreamMode> = audioModes.filter { it.second }.map { it.first }
@@ -112,6 +108,47 @@ class AppSettings(context: Context) {
 
     fun audioSettings() = AudioSettings(audioCycle().first(), audioVolume.toUByte(), audioDucking)
 
+    /**
+     * The four microphone modes in the user's order, each with whether CapsLock+F9 cycles
+     * through it; a session starts in the first checked one. Stored like [audioModes].
+     */
+    var micModes: List<Pair<MicStreamMode, Boolean>>
+        get() = readModes("mic_modes", ALL_MIC_MODES, ::micKey)
+            ?: ALL_MIC_MODES.map { it to (it != MicStreamMode.VAD) }
+        set(value) = writeModes("mic_modes", value, ::micKey)
+
+    /** The modes CapsLock+F9 cycles through; a session starts in the first. */
+    fun micCycle(): List<MicStreamMode> = micModes.filter { it.second }.map { it.first }
+
+    /**
+     * Let CapsLock+F9 remove the computer's microphone during a session. Without this, the
+     * shortcut skips Off once the microphone exists, so a call cannot lose it.
+     */
+    var micAllowRemove: Boolean
+        get() = preferences.getBoolean("mic_allow_remove", false)
+        set(value) = preferences.edit().putBoolean("mic_allow_remove", value).apply()
+
+    /** A stored mode list, if it is complete and has a checked mode. */
+    private fun <T> readModes(key: String, all: List<T>, keyOf: (T) -> String): List<Pair<T, Boolean>>? {
+        val stored = preferences.getString(key, null)
+            ?.split(',')
+            ?.mapNotNull { item ->
+                val mode = all.firstOrNull { keyOf(it) == item.removePrefix("-") }
+                    ?: return@mapNotNull null
+                mode to !item.startsWith("-")
+            }
+            ?.distinctBy { it.first }
+        return stored?.takeIf { it.size == all.size && it.any { mode -> mode.second } }
+    }
+
+    /** Stores e.g. `auto,off,-always`, where `-` marks a mode left out. */
+    private fun <T> writeModes(key: String, modes: List<Pair<T, Boolean>>, keyOf: (T) -> String) {
+        preferences.edit().putString(
+            key,
+            modes.joinToString(",") { (mode, on) -> (if (on) "" else "-") + keyOf(mode) },
+        ).apply()
+    }
+
     private companion object {
         val ALL_MODES = listOf(AudioStreamMode.OFF, AudioStreamMode.AUTO, AudioStreamMode.ALWAYS)
 
@@ -122,6 +159,20 @@ class AppSettings(context: Context) {
         }
 
         fun modeFromKey(key: String) = ALL_MODES.firstOrNull { modeKey(it) == key }
+
+        val ALL_MIC_MODES = listOf(
+            MicStreamMode.OFF,
+            MicStreamMode.MUTED,
+            MicStreamMode.UNMUTED,
+            MicStreamMode.VAD,
+        )
+
+        fun micKey(mode: MicStreamMode) = when (mode) {
+            MicStreamMode.OFF -> "off"
+            MicStreamMode.MUTED -> "muted"
+            MicStreamMode.UNMUTED -> "unmuted"
+            MicStreamMode.VAD -> "vad"
+        }
     }
 
     /**

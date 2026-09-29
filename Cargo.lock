@@ -997,6 +997,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "earshot"
+version = "1.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "afea66474c4036a7e5fa4b072a3b0a09cd0b01f00134da3115d76b7cc5899f03"
+
+[[package]]
 name = "ed25519"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3224,6 +3230,7 @@ dependencies = [
  "pipewire",
  "png",
  "qrcode",
+ "rconnect-audio",
  "rconnect-opus",
  "rconnect-protocol",
  "serde",
@@ -3237,15 +3244,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "rconnect-audio"
+version = "0.1.0"
+dependencies = [
+ "rconnect-opus",
+ "rconnect-protocol",
+ "tracing",
+]
+
+[[package]]
 name = "rconnect-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "cmake",
  "cpal",
+ "earshot",
  "iroh",
  "iroh-mdns-address-lookup",
  "ndk",
+ "rconnect-audio",
  "rconnect-opus",
  "rconnect-protocol",
  "serde",

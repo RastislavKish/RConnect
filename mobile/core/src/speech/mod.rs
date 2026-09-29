@@ -4,9 +4,8 @@
 mod audio;
 pub mod engine;
 pub mod espeak;
-pub mod host_audio;
 mod playback;
 pub mod voices;
 
 pub use engine::{SpeechEngine, VoiceSettings};
-pub use host_audio::HostAudio;
+pub use rconnect_audio::StreamPlayer;

@@ -19,8 +19,8 @@ use rconnect_protocol::messages::{
 
 use super::audio::Output;
 use super::espeak::{Espeak, Parameters, SynthSink};
-use super::host_audio::HostAudio;
 use super::playback::Playback;
+use rconnect_audio::StreamPlayer;
 
 /// Length of the chunks eSpeak NG synthesizes at a time. Shorter chunks start playback
 /// sooner and let a stop abort synthesis sooner.
@@ -100,7 +100,7 @@ impl SpeechEngine {
         data_dir: PathBuf,
         voice: VoiceSettings,
         keep_alive: bool,
-        host: Arc<HostAudio>,
+        host: Arc<StreamPlayer>,
     ) -> anyhow::Result<(SpeechEngine, UnboundedReceiver<SpeechEvent>)> {
         let (events_tx, events_rx) = unbounded_channel();
         let mut playback = Playback::new(events_tx);
@@ -197,7 +197,7 @@ struct Worker {
     espeak: Espeak,
     output: Output,
     playback: Arc<Mutex<Playback>>,
-    host_audio: Arc<HostAudio>,
+    host_audio: Arc<StreamPlayer>,
     generation: Arc<AtomicU64>,
     voice: VoiceSettings,
     host: SpeechSettings,
@@ -208,7 +208,7 @@ impl Worker {
         data_dir: &std::path::Path,
         voice: VoiceSettings,
         playback: Arc<Mutex<Playback>>,
-        host: Arc<HostAudio>,
+        host: Arc<StreamPlayer>,
         generation: Arc<AtomicU64>,
     ) -> anyhow::Result<Worker> {
         let espeak = Espeak::new(data_dir, CHUNK_MS)?;

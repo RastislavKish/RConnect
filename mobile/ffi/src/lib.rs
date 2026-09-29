@@ -6,12 +6,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use rconnect_core::speech::{self, HostAudio, SpeechEngine};
+use rconnect_core::speech::{self, SpeechEngine, StreamPlayer};
 use rconnect_core::{
-    AudioState, ConnectError, ConnectionPath as CorePath, Controller, Discovery, Host, PairError,
-    SessionEnd, SessionInput, SessionObserver, SpeechConfig, drive_session,
+    AudioState, ConnectError, ConnectionPath as CorePath, Controller, Discovery, Host, MicState,
+    PairError, SessionEnd, SessionInput, SessionObserver, SpeechConfig, drive_session,
 };
-use rconnect_protocol::messages::{AudioMode, EndReason, KeyMessage, SpeechKind, Utterance};
+use rconnect_protocol::messages::{
+    AudioMode, EndReason, KeyMessage, MicMode, SpeechKind, Utterance,
+};
 use rconnect_protocol::ticket::PairingTicket;
 use rconnect_protocol::{DeviceId, hex, words};
 use tokio::sync::mpsc;
@@ -96,6 +98,9 @@ pub trait SessionListener: Send + Sync {
     /// The computer's audio stream changed. `available` is false when the computer
     /// cannot stream audio; `mode` is then `Off`.
     fn on_audio(&self, mode: AudioStreamMode, available: bool);
+    /// The computer's microphone changed mode. `available` is false when the computer
+    /// cannot offer a microphone; `mode` is then `Off`.
+    fn on_mic(&self, mode: MicStreamMode, available: bool);
     /// The session ended; `reason` is a sentence to announce.
     fn on_ended(&self, reason: String);
 }
@@ -118,6 +123,52 @@ impl AudioStreamMode {
             AudioStreamMode::Always => Some(AudioMode::Always),
         }
     }
+}
+
+/// The phone's microphone as a microphone on the computer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum MicStreamMode {
+    /// No microphone on the computer.
+    Off,
+    /// The computer's microphone exists and stays silent.
+    Muted,
+    /// The phone's microphone is sent continuously.
+    Unmuted,
+    /// The phone's microphone is sent while someone speaks.
+    Vad,
+}
+
+impl From<MicStreamMode> for MicMode {
+    fn from(mode: MicStreamMode) -> Self {
+        match mode {
+            MicStreamMode::Off => MicMode::Off,
+            MicStreamMode::Muted => MicMode::Muted,
+            MicStreamMode::Unmuted => MicMode::Unmuted,
+            MicStreamMode::Vad => MicMode::Vad,
+        }
+    }
+}
+
+impl From<MicMode> for MicStreamMode {
+    fn from(mode: MicMode) -> Self {
+        match mode {
+            MicMode::Off => MicStreamMode::Off,
+            MicMode::Muted => MicStreamMode::Muted,
+            MicMode::Unmuted => MicStreamMode::Unmuted,
+            MicMode::Vad => MicStreamMode::Vad,
+        }
+    }
+}
+
+/// The microphone at the start of a session.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct MicSettings {
+    pub mode: MicStreamMode,
+    /// Whether the app has the microphone permission. Without it, Unmuted and VAD
+    /// behave as Muted.
+    pub permitted: bool,
+    /// Android's id of the microphone to use (the built-in one), or none for the default.
+    pub device_id: Option<i32>,
 }
 
 /// How the computer's audio plays on the phone.
@@ -266,6 +317,8 @@ impl RConnect {
 
     /// Connects to a paired computer and runs the session in the background.
     /// `speech_data_dir` contains `espeak-ng-data`.
+    // Kotlin calls this with named arguments; a settings record would only move them.
+    #[allow(clippy::too_many_arguments)]
     pub async fn start_session(
         &self,
         host_id: String,
@@ -273,6 +326,7 @@ impl RConnect {
         voice: VoiceSettings,
         keep_alive: bool,
         audio: AudioSettings,
+        mic: MicSettings,
         listener: Arc<dyn SessionListener>,
     ) -> Result<Arc<SessionHandle>, RConnectError> {
         let host = self
@@ -293,6 +347,9 @@ impl RConnect {
             audio_mode: audio.mode.to_core(),
             audio_volume: audio.volume,
             audio_ducking: audio.ducking,
+            mic_mode: mic.mode.into(),
+            mic_permitted: mic.permitted,
+            mic_device: mic.device_id,
         };
         tokio::spawn(async move {
             let observer = Observer(listener.clone());
@@ -384,6 +441,11 @@ impl SessionHandle {
     /// Switches the computer's audio stream; the listener's `on_audio` follows.
     pub fn set_audio_mode(&self, mode: AudioStreamMode) {
         let _ = self.inputs.send(SessionInput::Audio(mode.to_core()));
+    }
+
+    /// Sets the microphone's mode; the listener's `on_mic` follows.
+    pub fn set_mic_mode(&self, mode: MicStreamMode) {
+        let _ = self.inputs.send(SessionInput::Mic(mode.into()));
     }
 
     /// Ends the session; the listener's `on_ended` follows.
@@ -489,7 +551,7 @@ impl SpeechPreview {
             PathBuf::from(speech_data_dir),
             voice.into(),
             false,
-            Arc::new(HostAudio::new(0, false)),
+            Arc::new(StreamPlayer::new("host audio", 0, false)),
         )?;
         Ok(Arc::new(SpeechPreview {
             engine: Mutex::new(Some(engine)),
@@ -548,6 +610,13 @@ impl SessionObserver for Observer {
             AudioState::Unavailable => (AudioStreamMode::Off, false),
         };
         self.0.on_audio(mode, available);
+    }
+
+    fn mic(&self, state: MicState) {
+        match state {
+            MicState::Mode(mode) => self.0.on_mic(mode.into(), true),
+            MicState::Unavailable => self.0.on_mic(MicStreamMode::Off, false),
+        }
     }
 }
 

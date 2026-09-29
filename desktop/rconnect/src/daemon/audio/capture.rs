@@ -22,7 +22,7 @@ use pw::spa;
 use pw::spa::utils::dict::DictRef;
 use pw::types::ObjectType;
 
-use super::{CHANNELS, RATE};
+use super::RATE;
 
 /// Name of the capture node, also used to find it in the registry.
 const NODE_NAME: &str = "rconnect-audio";
@@ -133,7 +133,10 @@ fn run(
         })
         .register()?;
 
-    let format = format_pod()?;
+    let format = format_pod(&[
+        spa::sys::SPA_AUDIO_CHANNEL_FL,
+        spa::sys::SPA_AUDIO_CHANNEL_FR,
+    ])?;
     let mut params = [spa::pod::Pod::from_bytes(&format).context("invalid audio format")?];
     stream.connect(spa::utils::Direction::Input, None, flags, &mut params)?;
 
@@ -150,15 +153,14 @@ fn run(
     Ok(())
 }
 
-/// F32LE, 48 kHz, front left and front right.
-fn format_pod() -> anyhow::Result<Vec<u8>> {
+/// F32LE at 48 kHz with the given channel positions (`SPA_AUDIO_CHANNEL_*`).
+pub(super) fn format_pod(channels: &[u32]) -> anyhow::Result<Vec<u8>> {
     let mut info = spa::param::audio::AudioInfoRaw::new();
     info.set_format(spa::param::audio::AudioFormat::F32LE);
     info.set_rate(RATE);
-    info.set_channels(CHANNELS as u32);
+    info.set_channels(channels.len() as u32);
     let mut position = [0; spa::sys::SPA_AUDIO_MAX_CHANNELS as usize];
-    position[0] = spa::sys::SPA_AUDIO_CHANNEL_FL;
-    position[1] = spa::sys::SPA_AUDIO_CHANNEL_FR;
+    position[..channels.len()].copy_from_slice(channels);
     info.set_position(position);
     let object = spa::pod::Object {
         type_: spa::utils::SpaTypes::ObjectParamFormat.as_raw(),

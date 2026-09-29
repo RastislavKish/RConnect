@@ -9,16 +9,17 @@ use std::time::Duration;
 use anyhow::Context;
 use iroh::EndpointId;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
+use rconnect_audio::StreamPlayer;
 use rconnect_protocol::messages::{
     AudioDirection, AudioRequest, Capabilities, ControlMessage, EndReason, Handshake, KeyMessage,
-    RejectReason, SpeechCommand, SpeechEvent,
+    MicMode, RejectReason, SpeechCommand, SpeechEvent,
 };
 use rconnect_protocol::{PROTOCOL_VERSION, framing};
 use tokio::io::BufReader;
 use tokio::sync::{mpsc, oneshot};
 
 use super::Daemon;
-use super::audio::{AudioStream, CaptureKind};
+use super::audio::{AudioStream, CaptureKind, VirtualMic};
 use super::inhibit::SleepInhibitor;
 use crate::speech::ipc::OutputMode;
 use crate::store::AudioCapture;
@@ -91,7 +92,14 @@ impl Daemon {
         tracing::info!("session started with {name:?} ({})", hello.app_version);
         let ended = self
             .clone()
-            .session_loop(&connection, token, control_send, control_recv, end_rx)
+            .session_loop(
+                &connection,
+                token,
+                &name,
+                control_send,
+                control_recv,
+                end_rx,
+            )
             .await;
 
         self.keyboard.lock().unwrap().release_all();
@@ -112,15 +120,18 @@ impl Daemon {
         self: Arc<Self>,
         connection: &Connection,
         token: u64,
+        name: &str,
         mut control_send: SendStream,
         mut control_recv: BufReader<RecvStream>,
         end_rx: oneshot::Receiver<EndReason>,
     ) -> anyhow::Result<Ended> {
-        let capabilities = if self.config.audio == AudioCapture::Off {
-            Capabilities::NONE
-        } else {
-            Capabilities::AUDIO_TO_CONTROLLER
-        };
+        let mut capabilities = Capabilities::NONE;
+        if self.config.audio != AudioCapture::Off {
+            capabilities = capabilities | Capabilities::AUDIO_TO_CONTROLLER;
+        }
+        if self.config.microphone {
+            capabilities = capabilities | Capabilities::AUDIO_TO_HOST;
+        }
         let welcome = ControlMessage::Welcome(Handshake {
             protocol_version: PROTOCOL_VERSION,
             app_version: env!("CARGO_PKG_VERSION").into(),
@@ -144,8 +155,10 @@ impl Daemon {
             }
         };
 
+        let mic_input = MicInput::default();
         let ended = tokio::select! {
-            result = self.control_loop(connection, token, &mut control_recv, &mut control_send) => result?,
+            result = self.control_loop(connection, token, name, &mic_input, &mut control_recv, &mut control_send) => result?,
+            result = mic_in(connection, &mic_input) => result?,
             result = self.clone().keys_loop(connection) => result?,
             result = speech_out(speech_rx, speech_send) => result?,
             result = self.clone().speech_in(speech_recv) => result?,
@@ -253,10 +266,14 @@ impl Daemon {
         &self,
         connection: &Connection,
         token: u64,
+        name: &str,
+        mic_input: &MicInput,
         control: &mut BufReader<RecvStream>,
         replies: &mut SendStream,
     ) -> anyhow::Result<Ended> {
         let mut audio: Option<AudioStream> = None;
+        // Removed when this returns, that is, when the session ends.
+        let mut mic: Option<VirtualMic> = None;
         loop {
             match framing::read_message::<_, ControlMessage>(control).await {
                 Ok(Some(ControlMessage::Ping(number))) => {
@@ -275,12 +292,56 @@ impl Daemon {
                     }
                     framing::write_message(replies, &ControlMessage::AudioStop).await?;
                 }
+                Ok(Some(ControlMessage::MicRequest(mode))) => {
+                    let reply = self.set_mic(name, &mut mic, mic_input, mode);
+                    framing::write_message(replies, &reply).await?;
+                }
                 Ok(Some(other)) => tracing::warn!("unexpected control message {other:?}"),
                 Ok(None) => return Ok(Ended::ByController("control stream closed")),
                 Err(e) if e.is_recoverable() => tracing::warn!("ignoring control message: {e}"),
                 Err(e) => return Err(e.into()),
             }
         }
+    }
+
+    /// Creates, mutes, unmutes or removes the virtual microphone, and returns the answer
+    /// for the phone.
+    fn set_mic(
+        &self,
+        name: &str,
+        mic: &mut Option<VirtualMic>,
+        input: &MicInput,
+        mode: MicMode,
+    ) -> ControlMessage {
+        // Muting drops what is buffered at once instead of playing it out.
+        input.set(None);
+        if let Some(mic) = mic.as_ref() {
+            mic.player().reset();
+        }
+        if mode == MicMode::Off || !self.config.microphone {
+            mic.take();
+            return if self.config.microphone {
+                ControlMessage::MicState(MicMode::Off)
+            } else {
+                ControlMessage::MicUnavailable
+            };
+        }
+        if mic.is_none() {
+            let description = format!("RConnect microphone ({name})");
+            match tokio::task::block_in_place(|| VirtualMic::create(description)) {
+                Ok(created) => *mic = Some(created),
+                Err(e) => {
+                    tracing::warn!("cannot create the virtual microphone: {e:#}");
+                    return ControlMessage::MicUnavailable;
+                }
+            }
+        }
+        let mic = mic.as_ref().unwrap();
+        if matches!(mode, MicMode::Unmuted | MicMode::Vad) {
+            input.set(Some(mic.player().clone()));
+        }
+        tracing::info!("microphone {mode:?}");
+        ControlMessage::MicState(mode)
     }
 
     /// Starts the audio stream or changes its mode, and returns the answer for the phone.
@@ -324,6 +385,29 @@ impl Daemon {
                 tracing::warn!("cannot stream audio: {e:#}");
                 ControlMessage::AudioStop
             }
+        }
+    }
+}
+
+/// Where the phone's microphone datagrams go: the virtual microphone while it is unmuted,
+/// nowhere otherwise.
+#[derive(Default)]
+struct MicInput(std::sync::Mutex<Option<Arc<StreamPlayer>>>);
+
+impl MicInput {
+    fn set(&self, player: Option<Arc<StreamPlayer>>) {
+        *self.0.lock().unwrap() = player;
+    }
+}
+
+/// Feeds the phone's datagrams to the virtual microphone.
+async fn mic_in(connection: &Connection, input: &MicInput) -> anyhow::Result<Ended> {
+    loop {
+        let Ok(datagram) = connection.read_datagram().await else {
+            return Ok(Ended::ByController("connection lost"));
+        };
+        if let Some(player) = input.0.lock().unwrap().as_ref() {
+            player.push(&datagram);
         }
     }
 }

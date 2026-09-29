@@ -148,6 +148,8 @@ pub struct Config {
     /// Keep playing audio on this computer while it streams to the phone. When false,
     /// the default output is muted meanwhile, local speech included.
     pub local_audio: bool,
+    /// Offer the phone's microphone as a microphone on this computer.
+    pub microphone: bool,
 }
 
 /// How audio is captured when the phone asks for it (see `docs/ARCHITECTURE.md`, §5.6).
@@ -169,6 +171,7 @@ impl Default for Config {
             local_speech: true,
             audio: AudioCapture::Streams,
             local_audio: true,
+            microphone: true,
         }
     }
 }

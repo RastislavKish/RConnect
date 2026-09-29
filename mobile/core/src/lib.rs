@@ -5,9 +5,12 @@
 //! Bindings for Kotlin will be added on top of this API.
 
 mod driver;
+pub mod mic;
 pub mod speech;
 
-pub use driver::{AudioState, SessionInput, SessionObserver, SpeechConfig, drive_session};
+pub use driver::{
+    AudioState, MicState, SessionInput, SessionObserver, SpeechConfig, drive_session,
+};
 
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -19,7 +22,7 @@ use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey, TransportAdd
 use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 use rconnect_protocol::messages::{
     AudioDirection, AudioFormat, AudioMode, AudioRequest, Capabilities, ControlMessage, EndReason,
-    Handshake, KeyMessage, PairRejectReason, PairRequest, PairResponse, RejectReason,
+    Handshake, KeyMessage, MicMode, PairRejectReason, PairRequest, PairResponse, RejectReason,
     SpeechCommand, SpeechEvent,
 };
 use rconnect_protocol::ticket::{PairingTicket, SECRET_LEN};
@@ -114,6 +117,9 @@ impl Controller {
         let transport = QuicTransportConfig::builder()
             .max_idle_timeout(Some(IDLE_TIMEOUT.try_into()?))
             .keep_alive_interval(KEEP_ALIVE_INTERVAL)
+            // On a congested link, old microphone audio is dropped rather than queued
+            // ahead of keys.
+            .datagram_send_buffer_size(2048)
             .build();
         let secret_key = SecretKey::from_bytes(&secret_key);
         // Built here rather than by the endpoint, so discovery can subscribe to it.
@@ -285,7 +291,7 @@ impl Controller {
             protocol_version: PROTOCOL_VERSION,
             app_version: env!("CARGO_PKG_VERSION").into(),
             device_name: self.device_name.clone(),
-            capabilities: Capabilities::AUDIO_TO_CONTROLLER,
+            capabilities: Capabilities::AUDIO_TO_CONTROLLER | Capabilities::AUDIO_TO_HOST,
         });
         framing::write_message(&mut control_send, &hello)
             .await
@@ -371,6 +377,10 @@ pub enum SessionOutput {
     AudioStarted(AudioFormat),
     /// The host stopped streaming audio, or cannot stream it.
     AudioStopped,
+    /// The host's answer to [`Session::request_mic`].
+    MicState(MicMode),
+    /// The host cannot create the virtual microphone.
+    MicUnavailable,
     /// The session is over; nothing follows.
     Ended(SessionEnd),
 }
@@ -431,6 +441,13 @@ impl Session {
         Ok(())
     }
 
+    /// Sets the microphone's mode on the host. In Unmuted and VAD, the microphone's
+    /// datagrams are sent by a [`crate::mic::MicStream`].
+    pub async fn request_mic(&mut self, mode: MicMode) -> anyhow::Result<()> {
+        framing::write_message(&mut self.control, &ControlMessage::MicRequest(mode)).await?;
+        Ok(())
+    }
+
     /// The connection, e.g. to read audio datagrams from another task.
     pub fn connection(&self) -> Connection {
         self.connection.clone()
@@ -477,21 +494,19 @@ async fn read_control(mut stream: BufReader<RecvStream>, tx: mpsc::UnboundedSend
     let end = loop {
         match framing::read_message::<_, ControlMessage>(&mut stream).await {
             Ok(Some(ControlMessage::EndSession(reason))) => break SessionEnd::ByHost(reason),
-            Ok(Some(
-                message @ (ControlMessage::Pong(_)
-                | ControlMessage::AudioStarted(_)
-                | ControlMessage::AudioStop),
-            )) => {
+            Ok(Some(message)) => {
                 let output = match message {
                     ControlMessage::Pong(number) => SessionOutput::Pong(number),
                     ControlMessage::AudioStarted(format) => SessionOutput::AudioStarted(format),
-                    _ => SessionOutput::AudioStopped,
+                    ControlMessage::AudioStop => SessionOutput::AudioStopped,
+                    ControlMessage::MicState(mode) => SessionOutput::MicState(mode),
+                    ControlMessage::MicUnavailable => SessionOutput::MicUnavailable,
+                    _ => continue,
                 };
                 if tx.send(output).is_err() {
                     return;
                 }
             }
-            Ok(Some(_)) => {}
             Err(e) if e.is_recoverable() => {}
             Ok(None) | Err(_) => break SessionEnd::ConnectionLost,
         }

@@ -16,7 +16,7 @@ pub mod ticket;
 pub mod words;
 
 /// Version of the session and pairing protocols. Bumped on incompatible changes.
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 
 /// ALPN of the pairing protocol. Accepted from anyone, but only while the host has a
 /// pairing window open.

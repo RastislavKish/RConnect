@@ -82,6 +82,8 @@ audio = "streams"
 # false mutes the computer's output while the stream is on, local speech included, and
 # unmutes it afterwards, even after a crash. It needs audio = "streams".
 local_audio = true
+# Offer the phone's microphone as a microphone on this computer (default: true).
+microphone = true
 ```
 
 ## Audio from the computer
@@ -103,6 +105,32 @@ while speech plays. The computer's audio reaches the phone about 50 to 120 ms af
 plays, more with Bluetooth headphones. Muting the computer does not mute the stream, so
 the computer can stay silent while the phone plays its audio; `local_audio = false` does
 that for you whenever the stream is on.
+
+## Microphone
+
+The phone's microphone can be a microphone on the computer, for calls and dictation. It
+shows up in applications as "RConnect microphone (your phone's name)". There are four
+modes:
+
+- **Off:** no microphone on the computer.
+- **Muted:** the computer has the microphone, but it stays silent.
+- **Unmuted:** the phone's microphone is sent all the time.
+- **VAD:** voice activity detection; the phone's microphone is sent only while someone
+  speaks.
+
+As with the computer's audio, check the modes you want in the app's settings and put
+them in order. A session starts in the first checked mode, and CapsLock+F9 moves to the
+next one. By default a session starts with Off, the first press creates the microphone
+muted, and then the shortcut switches between Muted and Unmuted.
+
+Once the computer has the microphone, CapsLock+F9 skips Off, so a call does not lose it
+and quietly switch to the computer's own microphone. A setting allows removing it during
+a session. It is always removed when the session ends.
+
+The app always records from the phone's own microphone, even with a headset connected,
+and asks for the microphone permission when you first check Unmuted or VAD; without it,
+the computer's microphone stays silent. Use headphones, or the computer will hear what
+the phone plays.
 
 ## Commands
 
@@ -185,7 +213,9 @@ server on the internet; it is used when the two devices cannot reach each other 
 - `rconnect speech-monitor [--mirror]` stands in for the daemon and the phone, printing
   what the speech module sends.
 - `rconnect-dev-controller pair <link> | hosts | session` (from `mobile/core`) stands in
-  for the phone app. In a session, `audio off|auto|always` switches the audio stream;
+  for the phone app. In a session, `audio off|auto|always` switches the audio stream and
+  `mic off|muted|unmuted|vad` the microphone (`RCONNECT_DEV_MIC=tone` or `noise` sends a
+  test signal instead of the default input);
   `RUST_LOG=rconnect_core=debug` shows when bursts start and end.
 - The daemon's log: `journalctl --user -u rconnect` (it is a user service). For more
   detail, add `Environment=RUST_LOG=rconnect=debug` to the unit with

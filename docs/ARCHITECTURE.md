@@ -670,7 +670,10 @@ changes depending on whether audio happens to play, which makes Ping results con
 The phone's microphone as a microphone on the desktop, for calls, voice messages and
 dictation. It is the audio stream of §5.6 in the other direction and reuses its pieces:
 Opus, the datagram header, and the jitter buffer with loss concealment and clock drift
-correction, which moves from `mobile/core` into a shared crate used by both sides.
+correction, which lives in the shared `rconnect-audio` crate (`audio/`,
+`StreamPlayer`). Implemented in `desktop/rconnect/src/daemon/audio/mic.rs`,
+`mobile/core/src/mic/` and the app's settings and session screens. The daemon offers
+`AUDIO_TO_HOST` unless `microphone = false` is set in its configuration.
 
 The user is assumed to wear headphones. Nothing cancels echo: with the phone's speaker,
 the microphone picks up speech and the computer's audio, and in a call the other person
@@ -717,8 +720,11 @@ Countermeasures are listed in §7.
 
 - A PipeWire stream with `media.class = Audio/Source`, mono, 48 kHz, F32,
   `node.name = rconnect-microphone` and `node.description = RConnect microphone
-  (<phone name>)`. Applications list it like any microphone, including browsers through
-  pipewire-pulse.
+  (<phone name>)`. `pw-record --target rconnect-microphone` records from it; that
+  browsers and call applications list it is still to be checked **(verify)**.
+- The process callback produces exactly the frames PipeWire asks for
+  (`pw_buffer.requested`), read from the raw buffer because the Rust wrapper does not
+  expose it. Filling the whole buffer, as PipeWire's examples do, would add latency.
 - The name never changes. WirePlumber remembers the user's default source by name, so
   a user who chose it as the default once gets it back whenever it appears, and the
   previous default when it goes **(verify)**.
@@ -766,7 +772,9 @@ time speech is what should pass. Earshot is pure Rust, about 95 KB with its mode
 Apache 2.0, and very fast (about 3,600 times real time).
 
 - It takes 16 ms frames of mono audio at 16 kHz, so the encoder thread downsamples a
-  copy for it; Opus still gets 48 kHz.
+  copy for it (averaging three samples); Opus still gets 48 kHz.
+- In testing it blocked white noise completely but let a steady 440 Hz tone through: a
+  harmonic tone looks like a sustained vowel to it. Real rooms are what matters.
 - Its frames (16 ms) and Opus's (20 ms) do not line up. Each Opus frame is sent when a
   detection frame within it scored at least 0.5.
 - **Pre-roll** of 60 ms (three Opus frames), sent first when speech starts, so soft
@@ -782,8 +790,9 @@ Apache 2.0, and very fast (about 3,600 times real time).
 - Opus in VoIP mode (SILK or hybrid, tuned for speech), mono, 48 kHz, 24 kbps, 20 ms
   frames. In-band forward error correction with an expected loss of 5 %: a packet also
   carries a coarse copy of the previous one, so a single lost packet is recovered from
-  the next one, which the jitter buffer already holds. `rconnect-opus` gets the FEC
-  settings and a decode call that uses them.
+  the next one, which the jitter buffer already holds (`Encoder::voice`,
+  `Decoder::recover`). The player tries this before concealing, in both directions; the
+  audio stream of §5.6 carries no such data, so there it conceals as before.
 - The same 7-byte header as §5.6 (`protocol/src/audio.rs`). No format negotiation is
   needed: an Opus decoder decodes any Opus packet to the rate and channels it was made
   for, and the frame length comes from the packet.
@@ -824,10 +833,11 @@ frames save about 10 ms at twice the packet rate.
 protocol/                 rconnect-protocol crate (messages, framing, pairing URI, verification words)
 desktop/rconnect/         rconnectd + CLI + sd_rconnect (one binary, subcommands)
   src/daemon/             endpoint, pairing, sessions, uinput, speech hub, sleep inhibitor
-  src/daemon/audio/       audio stream: PipeWire tap, Auto gate, Opus encoder
+  src/daemon/audio/       audio stream (PipeWire tap, Auto gate, Opus encoder), virtual microphone
   src/speech/             sd_rconnect module, its IPC with the daemon, speech-monitor
   dist/                   udev rule, systemd user unit, module config
 opus/                     rconnect-opus crate: minimal libopus bindings for both sides
+audio/                    rconnect-audio crate: StreamPlayer, the jitter buffer for both directions
 mobile/core/              Rust core for Android: pairing, sessions, eSpeak NG speech and
                           the host audio stream; rconnect-dev-controller test binary
 mobile/RConnect/          Android app (Kotlin)
@@ -877,10 +887,13 @@ Low-priority experiments for later:
       controller: taps are made next to the sink links and removed with the stream,
       speech-dispatcher and `pw-loopback` streams are left out, and a muted sink still
       streams.
+- [x] Microphone (§5.7), tested with the dev controller and a generated tone: the source
+      appears as `Audio/Source`, records the tone when unmuted and silence when muted,
+      and disappears on Off and at session end.
 - [ ] Microphone (§5.7): whether WirePlumber restores a default source by name, whether
       an explicit built-in input keeps a Bluetooth headset on A2DP, how long AAudio takes
-      to open an input on real devices, and whether browsers and call applications list
-      a `pw_stream` source.
+      to open an input on real devices, whether browsers and call applications list the
+      source, and Earshot with a real voice.
 - [ ] Audio stream (§5.6): EasyEffects and filter chains, where stream volume is applied
       relative to the tap, whether the monitor fallback follows the sink's mute, the
       relays' rate limits, and playback on an Android device.

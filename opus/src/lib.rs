@@ -16,10 +16,13 @@ struct OpusDecoder {
 }
 
 const OPUS_OK: c_int = 0;
+const OPUS_APPLICATION_VOIP: c_int = 2048;
 const OPUS_APPLICATION_RESTRICTED_LOWDELAY: c_int = 2051;
 const OPUS_SET_BITRATE_REQUEST: c_int = 4002;
 const OPUS_SET_VBR_REQUEST: c_int = 4006;
 const OPUS_SET_COMPLEXITY_REQUEST: c_int = 4010;
+const OPUS_SET_INBAND_FEC_REQUEST: c_int = 4012;
+const OPUS_SET_PACKET_LOSS_PERC_REQUEST: c_int = 4014;
 const OPUS_RESET_STATE: c_int = 4028;
 
 unsafe extern "C" {
@@ -75,7 +78,7 @@ fn check(code: c_int) -> Result<c_int, Error> {
 /// Largest packet the encoder produces; more than enough for one frame at our bitrates.
 pub const MAX_PACKET: usize = 1275;
 
-/// Encoder in restricted low-delay mode (CELT only, about 5 ms algorithmic delay).
+/// Opus encoder: [`Encoder::new`] for general audio, [`Encoder::voice`] for speech.
 pub struct Encoder {
     state: *mut OpusEncoder,
     channels: usize,
@@ -85,14 +88,55 @@ pub struct Encoder {
 unsafe impl Send for Encoder {}
 
 impl Encoder {
+    /// Restricted low-delay mode (CELT only, about 5 ms algorithmic delay), for any audio.
     pub fn new(sample_rate: u32, channels: u8, bitrate: u32) -> Result<Encoder, Error> {
+        Encoder::create(
+            sample_rate,
+            channels,
+            bitrate,
+            OPUS_APPLICATION_RESTRICTED_LOWDELAY,
+        )
+    }
+
+    /// VoIP mode, tuned for speech, with in-band forward error correction: each packet
+    /// also carries a coarse copy of the previous one, which [`Decoder::recover`] uses
+    /// when that one is lost. `expected_loss` is in percent.
+    pub fn voice(
+        sample_rate: u32,
+        channels: u8,
+        bitrate: u32,
+        expected_loss: u8,
+    ) -> Result<Encoder, Error> {
+        let encoder = Encoder::create(sample_rate, channels, bitrate, OPUS_APPLICATION_VOIP)?;
+        // SAFETY: valid state; these requests take one int argument.
+        unsafe {
+            check(opus_encoder_ctl(
+                encoder.state,
+                OPUS_SET_INBAND_FEC_REQUEST,
+                1 as c_int,
+            ))?;
+            check(opus_encoder_ctl(
+                encoder.state,
+                OPUS_SET_PACKET_LOSS_PERC_REQUEST,
+                expected_loss as c_int,
+            ))?;
+        }
+        Ok(encoder)
+    }
+
+    fn create(
+        sample_rate: u32,
+        channels: u8,
+        bitrate: u32,
+        application: c_int,
+    ) -> Result<Encoder, Error> {
         let mut error = 0;
         // SAFETY: plain constructor; the result is checked.
         let state = unsafe {
             opus_encoder_create(
                 sample_rate as i32,
                 channels as c_int,
-                OPUS_APPLICATION_RESTRICTED_LOWDELAY,
+                application,
                 &mut error,
             )
         };
@@ -197,6 +241,25 @@ impl Decoder {
         Ok(check(frames)? as usize)
     }
 
+    /// Recovers a lost packet from the forward error correction data in the packet that
+    /// followed it. `out` holds exactly the lost packet's frames. Without such data, as
+    /// in packets from [`Encoder::new`], this conceals the loss instead.
+    pub fn recover(&mut self, next: &[u8], out: &mut [f32]) -> Result<usize, Error> {
+        // SAFETY: `next` is valid for its length and `out` is writable for `frame_size`
+        // frames.
+        let frames = unsafe {
+            opus_decode_float(
+                self.state,
+                next.as_ptr(),
+                next.len() as i32,
+                out.as_mut_ptr(),
+                (out.len() / self.channels) as c_int,
+                1,
+            )
+        };
+        Ok(check(frames)? as usize)
+    }
+
     /// Forgets the previous audio, e.g. at the start of a new burst.
     pub fn reset(&mut self) {
         // SAFETY: valid state; the request takes no argument.
@@ -246,6 +309,39 @@ mod tests {
 
         let frames = decoder.decode(None, &mut decoded).unwrap();
         assert_eq!(frames, FRAME);
+    }
+
+    #[test]
+    fn voice_frames_recover_a_lost_packet() {
+        const RATE: u32 = 48_000;
+        const FRAME: usize = 960;
+        let mut encoder = Encoder::voice(RATE, 1, 24_000, 5).unwrap();
+        let mut decoder = Decoder::new(RATE, 1).unwrap();
+        let mut packets = Vec::new();
+        for frame in 0..30 {
+            // A vowel-like mix of harmonics, which SILK encodes as speech.
+            let pcm: Vec<f32> = (0..FRAME)
+                .map(|i| {
+                    let t = (frame * FRAME + i) as f32 / RATE as f32;
+                    (1..6)
+                        .map(|h| 0.1 * (2.0 * std::f32::consts::PI * 150.0 * h as f32 * t).sin())
+                        .sum()
+                })
+                .collect();
+            let mut packet = [0u8; MAX_PACKET];
+            let len = encoder.encode(&pcm, &mut packet).unwrap();
+            packets.push(packet[..len].to_vec());
+        }
+        let mut out = vec![0f32; FRAME];
+        for packet in &packets[..20] {
+            decoder.decode(Some(packet), &mut out).unwrap();
+        }
+        // Packet 20 is lost; 21 carries it.
+        let frames = decoder.recover(&packets[21], &mut out).unwrap();
+        assert_eq!(frames, FRAME);
+        let energy = out.iter().map(|s| s * s).sum::<f32>() / FRAME as f32;
+        assert!(energy > 0.001, "recovered audio is silent: {energy}");
+        decoder.decode(Some(&packets[21]), &mut out).unwrap();
     }
 
     #[test]

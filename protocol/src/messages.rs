@@ -91,6 +91,13 @@ pub enum ControlMessage {
     Ping(u32),
     /// The host's answer to [`ControlMessage::Ping`].
     Pong(u32),
+    /// The controller sets its microphone's mode (see `docs/ARCHITECTURE.md`, §5.7). In
+    /// Unmuted and VAD it sends the microphone as audio datagrams.
+    MicRequest(MicMode),
+    /// The host's answer to [`ControlMessage::MicRequest`]: the mode now in effect.
+    MicState(MicMode),
+    /// The host's answer when it cannot create the virtual microphone.
+    MicUnavailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +129,20 @@ pub enum AudioDirection {
     ToController,
     ToHost,
     Duplex,
+}
+
+/// The controller's microphone, as the host's virtual microphone sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MicMode {
+    /// No virtual microphone on the host.
+    Off,
+    /// The virtual microphone exists and plays silence.
+    Muted,
+    /// The controller sends its microphone continuously.
+    Unmuted,
+    /// The controller sends its microphone while someone speaks (voice activity
+    /// detection); the host plays silence in between.
+    Vad,
 }
 
 /// When the host sends audio.
@@ -390,6 +411,10 @@ mod tests {
         assert_eq!(
             tag(postcard::to_allocvec(&ControlMessage::Pong(1)).unwrap()),
             8
+        );
+        assert_eq!(
+            tag(postcard::to_allocvec(&ControlMessage::MicUnavailable).unwrap()),
+            11
         );
         assert_eq!(tag(postcard::to_allocvec(&PairRequest::Query).unwrap()), 0);
     }

@@ -1,18 +1,19 @@
 //! Runs a session: speech from the host goes to the speech engine, playback events go
-//! back to the host, keys from the user interface go to the host, and the host's audio
-//! stream goes to the output.
+//! back to the host, keys from the user interface go to the host, the host's audio
+//! stream goes to the output, and the microphone goes to the host.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use rconnect_protocol::messages::{
-    AudioMode, Capabilities, KeyMessage, SpeechCommand, SpeechEvent,
+    AudioMode, Capabilities, KeyMessage, MicMode, SpeechCommand, SpeechEvent,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::Instant;
 
-use crate::speech::{HostAudio, SpeechEngine, VoiceSettings};
+use crate::mic::MicStream;
+use crate::speech::{SpeechEngine, StreamPlayer, VoiceSettings};
 use crate::{ConnectionPath, Session, SessionEnd, SessionOutput};
 
 /// What the user interface sends to a running session.
@@ -25,6 +26,8 @@ pub enum SessionInput {
     /// Stream the host's audio in this mode, or stop with `None`. The outcome goes to
     /// [`SessionObserver::audio`].
     Audio(Option<AudioMode>),
+    /// Set the microphone's mode. The outcome goes to [`SessionObserver::mic`].
+    Mic(MicMode),
     /// End the session from the controller.
     End,
 }
@@ -42,6 +45,22 @@ pub struct SpeechConfig {
     pub audio_volume: u8,
     /// Turn the host's audio down while speech plays.
     pub audio_ducking: bool,
+    /// The microphone at the start of the session.
+    pub mic_mode: MicMode,
+    /// Whether the app may use the microphone. Without permission, Unmuted and VAD
+    /// behave as Muted: the host's microphone exists and stays silent.
+    pub mic_permitted: bool,
+    /// The microphone to capture from (Android's device id), or the default.
+    pub mic_device: Option<i32>,
+}
+
+/// The host's virtual microphone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MicState {
+    /// The mode the host confirmed.
+    Mode(MicMode),
+    /// The host cannot create a microphone.
+    Unavailable,
 }
 
 /// Whether the host's audio streams.
@@ -61,6 +80,8 @@ pub trait SessionObserver: Send + Sync {
     fn ping(&self, _round_trip: Option<Duration>, _path: ConnectionPath) {}
     /// The host's audio stream started, changed mode or stopped.
     fn audio(&self, _state: AudioState) {}
+    /// The host's microphone changed mode, or cannot be created.
+    fn mic(&self, _state: MicState) {}
 }
 
 /// How long to wait for the host's answer to a ping.
@@ -76,7 +97,11 @@ pub async fn drive_session(
     let mut outputs = session
         .take_outputs()
         .expect("the session's outputs are unused");
-    let host_audio = Arc::new(HostAudio::new(speech.audio_volume, speech.audio_ducking));
+    let host_audio = Arc::new(StreamPlayer::new(
+        "host audio",
+        speech.audio_volume,
+        speech.audio_ducking,
+    ));
     // Datagrams go straight to the jitter buffer, without passing through the loop.
     let datagrams = tokio::spawn({
         let connection = session.connection();
@@ -112,7 +137,7 @@ async fn run(
     outputs: &mut UnboundedReceiver<SessionOutput>,
     inputs: &mut UnboundedReceiver<SessionInput>,
     speech: SpeechConfig,
-    host_audio: Arc<HostAudio>,
+    host_audio: Arc<StreamPlayer>,
     observer: &dyn SessionObserver,
 ) -> Option<SessionEnd> {
     let (engine, mut events) = match SpeechEngine::start(
@@ -140,6 +165,18 @@ async fn run(
             return Some(SessionEnd::ConnectionLost);
         }
     }
+    let mut mic = Mic {
+        available: session
+            .host_capabilities
+            .contains(Capabilities::AUDIO_TO_HOST),
+        permitted: speech.mic_permitted,
+        device: speech.mic_device,
+        stream: None,
+    };
+    if speech.mic_mode != MicMode::Off && mic.set(session, speech.mic_mode, observer).await.is_err()
+    {
+        return Some(SessionEnd::ConnectionLost);
+    }
 
     loop {
         tokio::select! {
@@ -165,6 +202,11 @@ async fn run(
                 Some(SessionOutput::AudioStopped) => {
                     host_audio.reset();
                     observer.audio(AudioState::Off);
+                }
+                Some(SessionOutput::MicState(mode)) => observer.mic(MicState::Mode(mode)),
+                Some(SessionOutput::MicUnavailable) => {
+                    mic.stream = None;
+                    observer.mic(MicState::Unavailable);
                 }
                 Some(SessionOutput::Ended(end)) => return Some(end),
                 None => return Some(SessionEnd::ConnectionLost),
@@ -194,6 +236,11 @@ async fn run(
                         return Some(SessionEnd::ConnectionLost);
                     }
                 }
+                Some(SessionInput::Mic(mode)) => {
+                    if mic.set(session, mode, observer).await.is_err() {
+                        return Some(SessionEnd::ConnectionLost);
+                    }
+                }
                 Some(SessionInput::End) | None => return None,
             },
             _ = ping_expired(ping) => {
@@ -201,6 +248,52 @@ async fn run(
                 ping = None;
             }
         }
+    }
+}
+
+/// The phone's side of the microphone.
+struct Mic {
+    /// Whether the host offers a microphone.
+    available: bool,
+    permitted: bool,
+    device: Option<i32>,
+    /// Open while the microphone is unmuted and permitted.
+    stream: Option<MicStream>,
+}
+
+impl Mic {
+    /// Asks the host for `mode`, and opens or closes the phone's microphone to match.
+    /// Fails only when the connection is lost.
+    async fn set(
+        &mut self,
+        session: &mut Session,
+        mode: MicMode,
+        observer: &dyn SessionObserver,
+    ) -> anyhow::Result<()> {
+        if !self.available {
+            observer.mic(MicState::Unavailable);
+            return Ok(());
+        }
+        // Asked first, so the host is ready for the audio that follows.
+        session.request_mic(mode).await?;
+        let live = matches!(mode, MicMode::Unmuted | MicMode::Vad);
+        if !live || !self.permitted {
+            self.stream = None;
+        } else if let Some(stream) = &self.stream {
+            stream.set_mode(mode);
+        } else {
+            let connection = session.connection();
+            let device = self.device;
+            // Opening a microphone blocks for a moment; keep it off the session loop.
+            match tokio::task::spawn_blocking(move || MicStream::start(connection, mode, device))
+                .await
+            {
+                Ok(Ok(stream)) => self.stream = Some(stream),
+                Ok(Err(e)) => tracing::warn!("cannot open the microphone: {e:#}"),
+                Err(e) => tracing::warn!("cannot open the microphone: {e}"),
+            }
+        }
+        Ok(())
     }
 }
 

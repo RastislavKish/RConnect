@@ -1,9 +1,10 @@
-//! Audio streamed from the host (see `docs/ARCHITECTURE.md`, §5.6).
+//! Plays an audio stream received as datagrams.
 //!
 //! Datagrams go into a jitter buffer. The audio callback decodes them as it needs audio,
-//! conceals lost frames with Opus packet loss concealment, and resamples the result to
-//! the device's rate, adjusting the ratio slightly to follow the host's clock. The mix is
-//! added on top of speech, never queued behind it, so speech latency is unaffected.
+//! recovers or conceals lost frames, and resamples the result to the device's rate,
+//! adjusting the ratio slightly to follow the sender's clock. The result is added to the
+//! callback's buffer: on the phone on top of speech, never queued behind it, so speech
+//! latency is unaffected.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Mutex;
@@ -11,7 +12,7 @@ use std::sync::Mutex;
 use rconnect_opus::Decoder;
 use rconnect_protocol::audio::AudioPacket;
 
-/// Opus always decodes to this rate, whatever the host encoded.
+/// Opus always decodes to this rate, whatever the sender encoded.
 const RATE: u32 = 48_000;
 const CHANNELS: usize = 2;
 /// The longest Opus frame, 120 ms.
@@ -29,12 +30,12 @@ const MAX_CONCEALED: u32 = 3;
 /// Seconds without an underrun after which the target shrinks by one packet.
 const STABLE_SECONDS: u32 = 30;
 
-/// Largest speed-up or slow-down used to follow the host's clock: ±0.4 %.
+/// Largest speed-up or slow-down used to follow the sender's clock: ±0.4 %.
 const MAX_CORRECTION: f64 = 0.004;
 /// Correction per packet of distance from the target.
 const CORRECTION_PER_PACKET: f64 = 0.001;
 
-/// Gain of host audio while speech plays, when ducking is on.
+/// Gain of the stream while speech plays, when ducking is on.
 const DUCKED_GAIN: f32 = 0.3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,11 +50,13 @@ enum State {
     Playing,
 }
 
-pub struct HostAudio {
+pub struct StreamPlayer {
     inner: Mutex<Inner>,
 }
 
 struct Inner {
+    /// What is played, for the log, e.g. `host audio`.
+    name: &'static str,
     decoder: Option<Decoder>,
     state: State,
     /// Packets by extended sequence number (see [`Inner::extend`]).
@@ -84,10 +87,12 @@ struct Inner {
     trace_frames: u64,
 }
 
-impl HostAudio {
-    pub fn new(volume: u8, ducking: bool) -> HostAudio {
-        HostAudio {
+impl StreamPlayer {
+    /// `name` says what is played, for the log, e.g. `host audio`.
+    pub fn new(name: &'static str, volume: u8, ducking: bool) -> StreamPlayer {
+        StreamPlayer {
             inner: Mutex::new(Inner {
+                name,
                 decoder: None,
                 state: State::Idle,
                 packets: BTreeMap::new(),
@@ -112,17 +117,17 @@ impl HostAudio {
         }
     }
 
-    /// Volume of host audio, 0..=100.
+    /// Volume of the stream, 0..=100.
     pub fn set_volume(&self, volume: u8) {
         self.inner.lock().unwrap().volume = volume_gain(volume);
     }
 
-    /// Whether host audio is turned down while speech plays.
+    /// Whether the stream is turned down while speech plays.
     pub fn set_ducking(&self, ducking: bool) {
         self.inner.lock().unwrap().ducking = ducking;
     }
 
-    /// A datagram from the host.
+    /// A datagram from the sender.
     pub fn push(&self, datagram: &[u8]) {
         let Some(packet) = AudioPacket::decode(datagram) else {
             return;
@@ -136,7 +141,7 @@ impl HostAudio {
         self.inner.lock().unwrap().reset();
     }
 
-    /// Adds host audio to `out`, `channels` interleaved channels at `device_rate`.
+    /// Adds the stream to `out`, `channels` interleaved channels at `device_rate`.
     /// `speaking` tells whether speech plays in this buffer, for ducking.
     pub fn mix(&self, out: &mut [f32], channels: usize, device_rate: u32, speaking: bool) {
         let Ok(mut inner) = self.inner.lock() else {
@@ -175,12 +180,12 @@ impl Inner {
 
     fn push(&mut self, packet: AudioPacket) {
         let mut seq = self.extend(packet.seq);
-        // Far from everything recent: the host started a new stream, and this packet
+        // Far from everything recent: the sender started a new stream, and this packet
         // overtook the message that says so.
         if let Some(newest) = self.newest
             && seq.abs_diff(newest) > 2 * MAX_BUFFERED as u64
         {
-            tracing::debug!("host audio numbering jumped; starting over");
+            tracing::debug!("{} numbering jumped; starting over", self.name);
             self.reset();
             seq = self.extend(packet.seq);
         }
@@ -218,7 +223,8 @@ impl Inner {
                     self.concealed = 0;
                     self.state = State::Playing;
                     tracing::debug!(
-                        "host audio plays ({} packets buffered, fresh burst: {fresh})",
+                        "{} plays ({} packets buffered, fresh burst: {fresh})",
+                        self.name,
                         self.packets.len()
                     );
                 }
@@ -232,7 +238,7 @@ impl Inner {
             match Decoder::new(RATE, CHANNELS as u8) {
                 Ok(decoder) => self.decoder = Some(decoder),
                 Err(e) => {
-                    tracing::warn!("cannot decode host audio: {e}");
+                    tracing::warn!("cannot decode {}: {e}", self.name);
                     self.state = State::Idle;
                     return;
                 }
@@ -249,10 +255,10 @@ impl Inner {
                     self.frame_len = frames;
                     self.pcm.extend(&self.decoded[..frames * CHANNELS]);
                 }
-                Err(e) => tracing::debug!("dropping undecodable host audio: {e}"),
+                Err(e) => tracing::debug!("dropping undecodable {}: {e}", self.name),
             }
             if packet.end_of_burst {
-                tracing::debug!("host audio burst ended");
+                tracing::debug!("{} burst ended", self.name);
                 self.state = State::Idle;
                 self.packets.clear();
             }
@@ -266,11 +272,21 @@ impl Inner {
             self.state = State::Buffering { fresh: false };
             self.target = (self.target + 1).min(MAX_TARGET);
             self.stable_frames = 0;
-            tracing::debug!("host audio ran dry; buffering {} packets", self.target);
+            tracing::debug!("{} ran dry; buffering {} packets", self.name, self.target);
+            return;
+        }
+        let frames = self.frame_len;
+        // The next packet may carry this one's forward error correction data (§5.7).
+        if lost
+            && let Some(next) = self.packets.get(&(seq + 1))
+            && let Ok(recovered) =
+                decoder.recover(&next.payload, &mut self.decoded[..frames * CHANNELS])
+        {
+            self.concealed = 0;
+            self.pcm.extend(&self.decoded[..recovered * CHANNELS]);
             return;
         }
         self.concealed += 1;
-        let frames = self.frame_len;
         match decoder.decode(None, &mut self.decoded[..frames * CHANNELS]) {
             Ok(frames) => {
                 // Fade concealment out, so a gap does not end in a loop of guesswork.
@@ -279,7 +295,7 @@ impl Inner {
                     .extend(self.decoded[..frames * CHANNELS].iter().map(|s| s * fade));
             }
             Err(e) => {
-                tracing::debug!("cannot conceal lost host audio: {e}");
+                tracing::debug!("cannot conceal lost {}: {e}", self.name);
                 self.pcm.extend(std::iter::repeat_n(0.0, frames * CHANNELS));
             }
         }
@@ -340,7 +356,8 @@ impl Inner {
         self.trace_frames += frames as u64;
         if self.trace_frames >= device_rate as u64 {
             tracing::trace!(
-                "host audio: level {:.4}, {:?}, {} packets buffered",
+                "{}: level {:.4}, {:?}, {} packets buffered",
+                self.name,
                 (self.trace_energy / self.trace_frames as f64).sqrt(),
                 self.state,
                 self.packets.len()
@@ -356,8 +373,8 @@ impl Inner {
         }
     }
 
-    /// How much faster than nominal to consume host audio, to keep the buffer at its
-    /// target despite the host's and the phone's clocks running at slightly different
+    /// How much faster than nominal to consume the stream, to keep the buffer at its
+    /// target despite the sender's and the receiver's clocks running at slightly different
     /// speeds.
     fn clock_correction(&mut self) -> f64 {
         if self.state != State::Playing {
@@ -416,7 +433,7 @@ mod tests {
     }
 
     /// Mixes 20 ms at 48 kHz stereo and returns the mean square.
-    fn play(audio: &HostAudio, speaking: bool) -> f32 {
+    fn play(audio: &StreamPlayer, speaking: bool) -> f32 {
         let mut out = vec![0.0; DEFAULT_FRAME * 2];
         audio.mix(&mut out, 2, RATE, speaking);
         out.iter().map(|s| s * s).sum::<f32>() / out.len() as f32
@@ -424,7 +441,7 @@ mod tests {
 
     #[test]
     fn plays_after_buffering_and_stops_at_end_of_burst() {
-        let audio = HostAudio::new(100, false);
+        let audio = StreamPlayer::new("test", 100, false);
         let mut host = Host::new();
         assert_eq!(play(&audio, false), 0.0);
 
@@ -447,7 +464,7 @@ mod tests {
 
     #[test]
     fn late_packets_are_dropped_and_losses_concealed() {
-        let audio = HostAudio::new(100, false);
+        let audio = StreamPlayer::new("test", 100, false);
         let mut host = Host::new();
         let packets: Vec<Vec<u8>> = (0..8).map(|_| host.packet(false)).collect();
         audio.push(&packets[0]);
@@ -474,7 +491,7 @@ mod tests {
 
     #[test]
     fn underrun_rebuffers_with_a_larger_target() {
-        let audio = HostAudio::new(100, false);
+        let audio = StreamPlayer::new("test", 100, false);
         let mut host = Host::new();
         audio.push(&host.packet(false));
         audio.push(&host.packet(false));
@@ -488,7 +505,7 @@ mod tests {
 
     #[test]
     fn a_restarted_stream_plays_after_reset() {
-        let audio = HostAudio::new(100, false);
+        let audio = StreamPlayer::new("test", 100, false);
         let mut host = Host::new();
         host.seq = 3000;
         for _ in 0..10 {
@@ -505,7 +522,7 @@ mod tests {
 
     #[test]
     fn a_jump_in_numbering_starts_over() {
-        let audio = HostAudio::new(100, false);
+        let audio = StreamPlayer::new("test", 100, false);
         let mut host = Host::new();
         host.seq = 3000;
         for _ in 0..10 {
@@ -522,7 +539,7 @@ mod tests {
 
     #[test]
     fn sequence_numbers_wrap() {
-        let audio = HostAudio::new(100, false);
+        let audio = StreamPlayer::new("test", 100, false);
         let mut host = Host::new();
         host.seq = u16::MAX - 1;
         for _ in 0..4 {
@@ -536,7 +553,7 @@ mod tests {
 
     #[test]
     fn ducking_lowers_host_audio_while_speech_plays() {
-        let audio = HostAudio::new(100, true);
+        let audio = StreamPlayer::new("test", 100, true);
         let mut host = Host::new();
         for _ in 0..3 {
             audio.push(&host.packet(false));
@@ -557,7 +574,7 @@ mod tests {
 
     #[test]
     fn clock_correction_follows_the_buffer_level() {
-        let audio = HostAudio::new(100, false);
+        let audio = StreamPlayer::new("test", 100, false);
         let mut host = Host::new();
         for _ in 0..3 {
             audio.push(&host.packet(false));

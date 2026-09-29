@@ -1,0 +1,10 @@
+[package]
+name = "rconnect-audio"
+version = "0.1.0"
+edition = "2024"
+description = "Plays RConnect's audio datagrams: jitter buffer, loss concealment, clock drift"
+
+[dependencies]
+rconnect-opus = { version = "0.1.0", path = "../opus" }
+rconnect-protocol = { version = "0.1.0", path = "../protocol" }
+tracing = "0.1.44"
