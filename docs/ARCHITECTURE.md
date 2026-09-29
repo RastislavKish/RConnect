@@ -413,7 +413,7 @@ side knows which is which without extra tags.
 | 2 | Keys | uni, phone → desktop | phone | highest |
 | 3 | Speech | bi (commands down, events up) | desktop | highest |
 | 4 | Braille | bi | reserved, opened only when both sides announce the capability | high |
-| – | Audio | datagrams | – | best effort |
+| – | Audio | datagrams, desktop → phone (§5.6) and phone → desktop (§5.7) | – | best effort |
 
 Keys and speech use separate streams, so a lost speech packet never delays a key
 press, and the reverse.
@@ -429,6 +429,9 @@ EndSession { reason: EndReason }        // user shortcut, desktop shutdown, repl
 AudioRequest { direction: AudioDir, mode: AudioMode }   // AudioMode = Auto | Always; also switches modes
 AudioStarted { direction: AudioDir, mode: AudioMode, codec: Codec, sample_rate: u32, channels: u8, frame_ms: u8 }
 AudioStop                               // back to Off
+MicRequest(MicMode)                     // phone → desktop; MicMode = Off | Muted | Live | Voice
+MicState(MicMode)                       // desktop's answer: the mode now in effect
+MicUnavailable                          // desktop's answer when it cannot create the microphone
 Ping(u32)                               // phone measures the round trip time
 Pong(u32)                               // desktop's answer, same number
 ```
@@ -477,7 +480,8 @@ or the platform braille APIs).
   the logind inhibitor, and enables key injection.
 - **End:** the user shortcut, the phone leaving the session screen or overlay,
   `EndSession`, or connection loss. Then: release all keys, switch the module back to
-  Local, and drop the inhibitor.
+  Local, stop the audio stream, remove the virtual microphone (§5.7), and drop the
+  inhibitor.
 
 ### 5.6 Optional audio stream
 
@@ -661,6 +665,153 @@ streaming. One side effect: a continuous stream keeps both Wi-Fi radios awake. A
 therefore hides the power-saving delay described in the README, while in Auto key latency
 changes depending on whether audio happens to play, which makes Ping results confusing.
 
+### 5.7 Microphone forwarding
+
+The phone's microphone as a microphone on the desktop, for calls, voice messages and
+dictation. It is the audio stream of §5.6 in the other direction and reuses its pieces:
+Opus, the datagram header, and the jitter buffer with loss concealment and clock drift
+correction, which moves from `mobile/core` into a shared crate used by both sides.
+
+The user is assumed to wear headphones. Nothing cancels echo: with the phone's speaker,
+the microphone picks up speech and the computer's audio, and in a call the other person
+hears themselves. That is the user's choice, as it is with any microphone.
+
+#### Modes
+
+- **Off:** no microphone on the phone and no virtual microphone on the desktop. Nothing
+  runs, as without the feature.
+- **Muted:** the desktop has a virtual microphone that plays silence. The phone's
+  microphone is closed, so Android's privacy indicator is off.
+- **Live:** the phone captures and sends continuously.
+- **Voice:** the phone captures, but sends only while someone speaks (Earshot, below).
+  The desktop plays silence in between.
+
+The desktop cannot tell Live from Voice by the packets; it hears the mode in
+`MicRequest` for its log and for `MicState`.
+
+**The virtual microphone does not disappear on its own.** If it vanished during a call,
+the call application would quietly switch to the laptop's own microphone. So once it
+exists, it stays until the session ends:
+
+- **CapsLock+F9** toggles between Muted and the live mode the user chose in the settings
+  (Live or Voice), announced like the other shortcuts. This is the key action in a call,
+  so it is a single key and acts at once: the phone stops sending, and the desktop drops
+  whatever is buffered as soon as it hears `Muted`, rather than playing it out.
+- **Off during a session** needs an explicit opt-in in the settings ("Allow removing the
+  computer's microphone during a session"), whose description says what happens to a
+  running call. Only then does **CapsLock+Shift+F9** remove it. Without the opt-in, the
+  shortcut says that the microphone stays and where to change that.
+- **Mode at session start**, in the settings: Off (default), Muted, or the live mode.
+  From Off, CapsLock+F9 creates the microphone, unmuted.
+- **At session end** the microphone is removed; this cannot be avoided, since the
+  desktop no longer has a phone. A call still running falls back to another microphone.
+  Countermeasures are listed in §7.
+
+#### Desktop: the virtual microphone
+
+- A PipeWire stream with `media.class = Audio/Source`, mono, 48 kHz, F32,
+  `node.name = rconnect-microphone` and `node.description = RConnect microphone
+  (<phone name>)`. Applications list it like any microphone, including browsers through
+  pipewire-pulse.
+- The name never changes. WirePlumber remembers the user's default source by name, so
+  a user who chose it as the default once gets it back whenever it appears, and the
+  previous default when it goes **(verify)**.
+- PipeWire pulls audio from it; its process callback takes samples from the jitter
+  buffer, and plays silence while the buffer is empty, while muted and between Voice
+  bursts. Clock drift is corrected the same way as on the phone (§5.6), because the
+  graph runs on the desktop's sound card clock.
+- `node.latency` asks for about 10 ms, as for the capture in §5.6.
+- It is created on the first `MicRequest` other than Off, on the same PipeWire
+  connection as the audio capture if that runs, and destroyed on Off or at session end.
+  If PipeWire refuses, the desktop answers `MicUnavailable`.
+
+#### Phone: capture
+
+- AAudio input in low-latency mode, mono, at the device's rate (resampled to 48 kHz if it
+  differs), with the `VoiceRecognition` input preset: clean audio, and no switch to
+  Android's call mode, which would change routing.
+- **Always the phone's own microphone.** The app picks the built-in microphone
+  (`AudioDeviceInfo.TYPE_BUILTIN_MIC`) and passes its device id to AAudio, even when a
+  Bluetooth or wired headset is connected. Using a Bluetooth headset's microphone would
+  switch the headset from A2DP to its call profile, with narrowband mono audio for
+  everything, speech included, and a gap while it switches **(verify)** that an explicit
+  built-in input keeps A2DP.
+- The input is open only in Live and Voice. Opening it takes roughly 50–200 ms on
+  Android **(verify)**, so the first moment after unmuting may be lost; the capture
+  starts right after the shortcut, before anything else.
+- The audio callback only copies samples into a ring buffer. Resampling, Earshot and
+  Opus run on an encoder thread of their own, never on the thread that sends keys, and
+  never in the callback.
+- **Permission:** `RECORD_AUDIO` is asked for when the user first picks a mode other
+  than Off. If it is denied, the phone behaves as Muted: the desktop's microphone
+  exists and stays silent, and the shortcut says why.
+- **Silenced by the system:** Android 12's microphone toggle delivers silence without an
+  error, which needs no handling. Android 10+ silences an app while another one (a phone
+  call, the assistant) takes the microphone; the app watches the recording
+  configuration (`isClientSilenced`) and announces it.
+- Android lets only foreground apps use the microphone. The session screen is in the
+  foreground; a future "phone in pocket" mode needs a foreground service of type
+  `microphone`, which Android 14 lets start only while the app is visible.
+
+#### Voice: Earshot
+
+Voice activity detection is the right tool here, unlike for §5.6's gate, because this
+time speech is what should pass. Earshot is pure Rust, about 95 KB with its model, MIT or
+Apache 2.0, and very fast (about 3,600 times real time).
+
+- It takes 16 ms frames of mono audio at 16 kHz, so the encoder thread downsamples a
+  copy for it; Opus still gets 48 kHz.
+- Its frames (16 ms) and Opus's (20 ms) do not line up. Each Opus frame is sent when a
+  detection frame within it scored at least 0.5.
+- **Pre-roll** of 60 ms (three Opus frames), sent first when speech starts, so soft
+  onsets are not cut. **Hold** of 400 ms after the last speech, so pauses between words
+  and soft endings pass. The last frame of a burst carries the end-of-burst flag, as in
+  §5.6, and the encoder is reset at the start of each burst.
+- What it gains: less traffic and battery than Live, and no room noise between
+  sentences. Call applications suppress noise themselves, so it is a convenience, built
+  after Live works.
+
+#### Wire format
+
+- Opus in VoIP mode (SILK or hybrid, tuned for speech), mono, 48 kHz, 24 kbps, 20 ms
+  frames. In-band forward error correction with an expected loss of 5 %: a packet also
+  carries a coarse copy of the previous one, so a single lost packet is recovered from
+  the next one, which the jitter buffer already holds. `rconnect-opus` gets the FEC
+  settings and a decode call that uses them.
+- The same 7-byte header as §5.6 (`protocol/src/audio.rs`). No format negotiation is
+  needed: an Opus decoder decodes any Opus packet to the rate and channels it was made
+  for, and the frame length comes from the packet.
+- The phone's datagram send buffer is 2 KB, like the desktop's, so on a congested link
+  old microphone audio is dropped rather than queued ahead of keys.
+
+#### Latency
+
+Keys and the microphone travel the same way, phone → desktop, unlike the audio stream.
+At 24 kbps and 50 packets a second the microphone is still small next to what Wi-Fi
+carries, the keys stream has the highest priority, and the send buffer bounds what can
+queue. Pinging with the microphone live should stay where it is with the audio stream
+on (4 ms on the LAN in testing).
+
+Microphone to call application (estimates):
+
+| Stage | Typical |
+|---|---|
+| AAudio input, low latency | 5–20 ms |
+| Opus frame + algorithmic delay | 20 ms + about 5 ms |
+| Network (LAN) | 2–5 ms |
+| Jitter buffer on the desktop | 20–60 ms |
+| PipeWire quantum | 5–21 ms |
+
+About 60–130 ms, within what calls tolerate one way (about 150 ms feels natural). 10 ms
+frames save about 10 ms at twice the packet rate.
+
+#### Privacy
+
+- Android's indicator shows whenever the phone's microphone is open, which is only in
+  Live and Voice. Every mode change is announced.
+- Audio goes only to the paired desktop, over the session's authenticated connection.
+- The desktop plays nothing into the microphone that did not come from the phone.
+
 ## 6. Code layout
 
 ```
@@ -686,6 +837,13 @@ Low-priority experiments for later:
 - Virtual braille keyboard on the touch screen: it is translated to key events on the
   phone and reuses the Keys stream.
 - Several simultaneous controllers.
+- Microphone forwarding (§5.7), countermeasures for the microphone disappearing at
+  session end, each an explicit setting on the desktop: muting the desktop's own
+  microphones during a session, keeping a silent virtual microphone after the session
+  until the daemon stops, and making the virtual microphone the default source through
+  WirePlumber's metadata.
+- Microphone forwarding: a headset microphone as an explicit choice, and a "fast unmute"
+  that keeps the phone's input open (and its privacy indicator on) while muted.
 
 ## 8. Open questions and verification list
 
@@ -713,6 +871,10 @@ Low-priority experiments for later:
       controller: taps are made next to the sink links and removed with the stream,
       speech-dispatcher and `pw-loopback` streams are left out, and a muted sink still
       streams.
+- [ ] Microphone (§5.7): whether WirePlumber restores a default source by name, whether
+      an explicit built-in input keeps a Bluetooth headset on A2DP, how long AAudio takes
+      to open an input on real devices, and whether browsers and call applications list
+      a `pw_stream` source.
 - [ ] Audio stream (§5.6): EasyEffects and filter chains, where stream volume is applied
       relative to the tap, whether the monitor fallback follows the sink's mute, the
       relays' rate limits, and playback on an Android device.
