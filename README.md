@@ -1,5 +1,10 @@
 # RConnect
+
 Use a full fledged desktop environment on your Android device
+
+## Under development
+
+This project is still under active development, the code is shared publicly for educational purposes only. The readme will be rewritten when the first release gets finished.
 
 RConnect lets a blind user control a Linux desktop from an Android phone with a keyboard
 attached. Keys go from the phone to the computer, and the text the screen reader speaks
